@@ -1,0 +1,102 @@
+@import "tailwindcss";
+
+/*
+ * Design tokens derived from DESIGN.md (Vercel/Geist design language).
+ * Achromatic by default: blue is the only interactive accent, and status
+ * colours appear exclusively as ~10px indicator dots.
+ */
+@theme {
+  --color-background: #fafafa;
+  --color-elevated: #ffffff;
+  --color-recessed: #f2f2f2;
+  --color-hover: #ebebeb;
+
+  --color-foreground: #171717;
+  --color-secondary: #4d4d4d;
+  --color-muted: #8f8f8f;
+
+  --color-accent: #0072f5;
+  --color-focus: #005fcc;
+
+  --color-status-green: #45a557;
+  --color-status-red: #e5484d;
+  --color-status-orange: #ff990a;
+
+  --font-sans: "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+    sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, SFMono-Regular, "Roboto Mono",
+    monospace;
+
+  /* 4px base unit — see DESIGN.md §5 */
+  --spacing: 4px;
+
+  --radius-DEFAULT: 6px;
+  --radius-card: 12px;
+
+  --ease-swift: cubic-bezier(0.175, 0.885, 0.32, 1.1);
+}
+
+/*
+ * Shadow-as-border (DESIGN.md §6): box-shadow replaces CSS `border` so that
+ * boundaries never affect box-model dimensions.
+ */
+@utility shadow-border {
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.08);
+}
+@utility shadow-border-small {
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.08), 0 2px 2px rgb(0 0 0 / 0.04);
+}
+@utility shadow-border-medium {
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.08), 0 2px 2px rgb(0 0 0 / 0.04),
+    0 8px 8px -8px rgb(0 0 0 / 0.04);
+}
+@utility shadow-menu {
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.08), 0 1px 1px rgb(0 0 0 / 0.02),
+    0 4px 8px -4px rgb(0 0 0 / 0.04), 0 16px 24px -8px rgb(0 0 0 / 0.06);
+}
+
+/* Double-ring focus (DESIGN.md §4): white inner gap, blue outer indicator. */
+@utility focus-ring {
+  box-shadow: 0 0 0 2px #fff, 0 0 0 4px var(--color-accent);
+}
+
+@layer base {
+  html {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    font-family: var(--font-sans);
+    font-feature-settings: "liga";
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Aggressive negative tracking on display sizes — DESIGN.md §3. */
+  h1 {
+    font-size: 48px;
+    font-weight: 600;
+    line-height: 48px;
+    letter-spacing: -2.28px;
+  }
+  h3 {
+    font-size: 32px;
+    font-weight: 600;
+    line-height: 40px;
+    letter-spacing: -1.28px;
+  }
+  h2 {
+    font-size: 14px;
+    font-weight: 500;
+    line-height: 20px;
+    letter-spacing: -0.28px;
+  }
+
+  /* Never weight 700 — the Geist system caps at 600. */
+  strong,
+  b {
+    font-weight: 600;
+  }
+
+  :focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px #fff, 0 0 0 4px var(--color-accent);
+  }
+}
