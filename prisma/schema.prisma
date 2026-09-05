@@ -29,6 +29,11 @@ model User {
 /// and reused; there is never more than one Conversation for a given pair.
 model Conversation {
   id        String   @id @default(cuid())
+  /// The two participants' user ids, sorted and joined. A pair yields the same
+  /// key whichever side opens the thread, so the unique constraint below is
+  /// what enforces "never more than one Conversation for a given pair" --
+  /// rather than a read-then-write check two concurrent opens could both pass.
+  pairKey   String   @unique
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

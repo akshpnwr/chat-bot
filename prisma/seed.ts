@@ -4,6 +4,7 @@ config({ path: ".env", quiet: true });
 
 const { prisma } = await import("../src/lib/db.js");
 const { auth } = await import("../src/lib/auth.js");
+const { openConversation } = await import("../src/server/conversations.js");
 
 /**
  * Demo accounts published in the README so a reviewer can sign in as two
@@ -33,7 +34,7 @@ async function ensureUser(spec: (typeof DEMO_USERS)[number]) {
     return existing;
   }
   if (existing) {
-    console.log(`[seed] user ${spec.email} has no credential — recreating`);
+    console.log(`[seed] user ${spec.email} has no credential - recreating`);
     await prisma.user.delete({ where: { id: existing.id } });
   }
 
@@ -48,31 +49,16 @@ async function ensureUser(spec: (typeof DEMO_USERS)[number]) {
 }
 
 /**
- * Reuses the existing Conversation for a pair rather than creating a second
- * one -- there is never more than one Conversation for a given pair.
+ * Delegates to the message service so the seed creates a Conversation exactly
+ * the way the application does -- pair key included -- rather than keeping a
+ * second copy of the reuse rule that could drift from it.
  */
 async function ensureConversation(userAId: string, userBId: string) {
-  const existing = await prisma.conversation.findFirst({
-    where: {
-      AND: [
-        { participants: { some: { userId: userAId } } },
-        { participants: { some: { userId: userBId } } },
-      ],
-    },
+  const conversation = await openConversation({
+    userId: userAId,
+    otherUserId: userBId,
   });
-  if (existing) {
-    console.log(`[seed] conversation exists: ${existing.id}`);
-    return existing;
-  }
-
-  const conversation = await prisma.conversation.create({
-    data: {
-      participants: {
-        create: [{ userId: userAId }, { userId: userBId }],
-      },
-    },
-  });
-  console.log(`[seed] created conversation: ${conversation.id}`);
+  console.log(`[seed] conversation ready: ${conversation.id}`);
   return conversation;
 }
 
