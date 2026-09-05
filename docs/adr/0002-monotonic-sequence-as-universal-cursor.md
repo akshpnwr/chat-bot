@@ -23,6 +23,9 @@ Three separate requirements collapse into one index, `(conversationId, seq DESC)
 
 `createdAt` remains on the row for display but is never used for ordering.
 
+Being a 64-bit integer, the Sequence cannot cross the wire as a JSON number; ADR-0006 records
+how it is represented at the serialization boundary.
+
 A global sequence is a single Postgres sequence, which would become a write bottleneck at very
 high throughput. At this system's scale it is not, and the simplicity is worth more than the
 theoretical ceiling. A per-conversation counter would remove the bottleneck at the cost of a

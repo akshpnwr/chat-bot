@@ -31,8 +31,9 @@ system promises never to silently lose a Message past.
 _Avoid_: Saved, persisted, committed
 
 **Read Mark**:
-A Participant's high-water mark — the most recent Message they have read. Everything at or
-before it is read; everything after is unread. Reads are monotonic and never move backwards.
+A Participant's high-water mark — the most recent Message they have read, held as that
+Message's Sequence. Everything at or before it is read; everything after is unread. Reads are
+monotonic and never move backwards.
 _Avoid_: Receipt, read state, seen flag
 
 **Unread Count**:
@@ -44,7 +45,15 @@ Whether a User currently holds at least one live socket connection. Derived from
 connections, not stored as a field.
 _Avoid_: Status, online flag
 
+**Sequence**:
+A Message's position in the single, strictly increasing order shared by every Conversation.
+Assigned by the server when a Message is Accepted and never reused or reordered. One Sequence
+underlies four readings of the same number — sort order, the page boundary a reader walks back
+through, a Sync Cursor, and a Read Mark — so these are views of one value, not four quantities
+that could disagree.
+_Avoid_: Timestamp, index, position, offset
+
 **Sync Cursor**:
 The most recent Message a client already holds, sent on reconnection so the server can return
-only what was missed.
+only what was missed. A reading of that Message's Sequence.
 _Avoid_: Watermark, offset, checkpoint
