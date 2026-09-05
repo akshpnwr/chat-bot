@@ -45,9 +45,10 @@ function formatTime(iso: string): string {
  *    the bottom. Yanking someone back down while they read history is worse
  *    than letting a Message arrive unseen.
  *  - Prepending an older page must not move what the reader is looking at.
- *    Rows are inserted above the viewport, so the scroll offset is corrected by
- *    the height that appeared -- the anchoring the ticket asks for. See the
- *    layout effect below for the bound on how exact that correction is.
+ *    Rows are inserted above the viewport, so the reader is held on one real
+ *    Message across the insert and the measurements that follow it -- the
+ *    anchoring the ticket asks for. See the layout effect below for why this is
+ *    done by a Message's offset rather than by height arithmetic.
  */
 export function MessageList({
   entries,
@@ -79,10 +80,41 @@ export function MessageList({
   // Anchoring state, held in refs because the correction has to happen in the
   // same frame the new rows are laid out -- a re-render would be a visible jump.
   const previousTotalSize = useRef(0);
+  /**
+   * True from a prepend until the rows it added have all been measured, during
+   * which every growth of the total is that page settling into its real height.
+   */
+  const settling = useRef(false);
+  /**
+   * The Message the reader's position is held against while a page settles, and
+   * how far below the top of the viewport it sat when the page was requested.
+   */
+  const anchorKey = useRef<string | null>(null);
+  const anchorOffset = useRef(0);
   const previousCount = useRef(0);
   const pinnedToBottom = useRef(true);
 
   const firstKey = useRef<string | null>(null);
+
+  /**
+   * Puts the anchored Message back at the offset it held. The row's measured
+   * `start` is read from the virtualizer rather than from the DOM: rows are
+   * absolutely positioned, so their laid-out offset is the estimate until the
+   * measurement lands, whereas the cache carries the real figure as soon as it
+   * is known.
+   */
+  const restoreAnchor = useCallback(
+    (element: HTMLDivElement) => {
+      const index = entries.findIndex(
+        (entry) => entry.clientMessageId === anchorKey.current,
+      );
+      if (index === -1) return;
+      const start = virtualizer.measurementsCache[index]?.start;
+      if (start === undefined) return;
+      element.scrollTop = start - anchorOffset.current;
+    },
+    [entries, virtualizer],
+  );
 
   const isAtBottom = useCallback(() => {
     const element = scrollRef.current;
@@ -106,20 +138,27 @@ export function MessageList({
       currentFirstKey !== firstKey.current;
 
     if (prepended) {
-      // Everything the reader is looking at moved down by the height inserted
-      // above it, so adding that height back leaves the viewport on the same
-      // Message -- which is what "does not jump" means.
+      // Anchor on a Message rather than on a height.
       //
-      // KNOWN LIMITATION: the correction uses the virtualizer's total, which
-      // still reads the estimate for rows that have not been measured yet, so
-      // the viewport is left off by the estimate's error -- observed at ~64px
-      // per page against the 10,000-Message seed. Correcting from measured
-      // height instead is not simply a better number to use: every attempt so
-      // far either re-entered the virtualizer's own `flushSync` measurement
-      // (which React refuses outright) or moved the viewport further. Tracked
-      // as follow-up work; the position is stable and off by a bounded amount,
-      // rather than unstable.
-      element.scrollTop += totalSize - previousTotalSize.current;
+      // Height arithmetic cannot close this gap. The virtualizer lays prepended
+      // rows out at an estimate and revises the total as each is measured, so
+      // every height available during that window is provisional -- and the DOM
+      // offers no better one, because the rows are absolutely positioned and
+      // the container's `scrollHeight` is merely the spacer, which is the
+      // estimate again. Correcting by a provisional number leaves the viewport
+      // off by however wrong the estimate was.
+      //
+      // A row's own offset, by contrast, is a fact at every instant. Holding
+      // one real Message at the offset it already occupied is also the literal
+      // statement of what the reader wants: the thing they were reading does
+      // not move.
+      restoreAnchor(element);
+      // Held until the measurements stop changing, because each remeasure moves
+      // that Message again and it has to be put back each time.
+      settling.current = true;
+    } else if (settling.current) {
+      restoreAnchor(element);
+      if (totalSize === previousTotalSize.current) settling.current = false;
     } else if (pinnedToBottom.current) {
       element.scrollTop = element.scrollHeight;
     }
@@ -127,7 +166,7 @@ export function MessageList({
     previousTotalSize.current = totalSize;
     previousCount.current = entries.length;
     firstKey.current = currentFirstKey;
-  }, [entries, totalSize]);
+  }, [entries, restoreAnchor, totalSize]);
 
   /**
    * Requests the next page on a fresh task rather than inline.
@@ -139,8 +178,22 @@ export function MessageList({
    * where a fetch belongs anyway.
    */
   const requestOlder = useCallback(() => {
+    // Note which Message the reader is on *before* asking for more, while the
+    // list on screen is still the one they are looking at. This is the row the
+    // prepend will be anchored to.
+    const element = scrollRef.current;
+    if (element) {
+      const offset = element.scrollTop;
+      const first = virtualizer
+        .getVirtualItems()
+        .find((item) => item.start >= offset);
+      if (first) {
+        anchorKey.current = String(first.key);
+        anchorOffset.current = first.start - offset;
+      }
+    }
     setTimeout(onLoadOlder, 0);
-  }, [onLoadOlder]);
+  }, [onLoadOlder, virtualizer]);
 
   const onScroll = useCallback(() => {
     const element = scrollRef.current;
