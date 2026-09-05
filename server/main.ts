@@ -1,9 +1,10 @@
+// Loading env must happen before any module that reads process.env at import
+// time (src/lib/db.ts does). ESM hoists imports, so this side-effecting import
+// has to come first and the rest are loaded dynamically below.
+import "./env.js";
+
 import { createServer } from "node:http";
 import next from "next";
-import { attachSocketServer } from "./socket.js";
-import { loadEnv } from "./env.js";
-
-loadEnv();
 
 const dev = process.env.NODE_ENV !== "production";
 const port = Number(process.env.PORT ?? 3000);
@@ -15,6 +16,8 @@ const hostname = process.env.HOSTNAME ?? "0.0.0.0";
  * what lets presence and the in-memory state live alongside the app (ADR-0001).
  */
 async function main() {
+  const { attachSocketServer } = await import("./socket.js");
+
   const app = next({ dev, hostname, port });
   await app.prepare();
   const handle = app.getRequestHandler();

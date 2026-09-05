@@ -12,8 +12,20 @@ export interface ServerToClientEvents {
 
 export interface ClientToServerEvents {
   ping: (callback: (reply: { ok: true; at: number }) => void) => void;
+  /**
+   * Join a Conversation's broadcast room. The server runs the membership guard
+   * before joining, so a non-member never enters the room at all.
+   */
+  "conversation:join": (
+    payload: { conversationId: string },
+    callback: (reply: { ok: true } | { ok: false; error: string }) => void,
+  ) => void;
 }
 
 export interface SocketData {
+  /**
+   * Established from the session cookie at handshake time and fixed for the
+   * connection's lifetime. Never read from an event payload.
+   */
   userId: string;
 }
