@@ -106,3 +106,82 @@ export async function readMessages({
     nextCursor: messages.length === limit && oldest ? oldest.seq : null,
   };
 }
+
+/**
+ * How many Messages one sync round trip carries.
+ *
+ * Bounded rather than unbounded because a client returning after a long
+ * absence could otherwise ask the server to load and serialize an entire
+ * Conversation into one frame. The bound is what makes recovery incremental:
+ * `hasMore` tells the caller to come back with the cursor advanced, so an
+ * arbitrarily long gap is drained in fixed-size steps instead of one that
+ * grows with how long the client was away.
+ */
+export const SYNC_PAGE_LIMIT = 200;
+
+/** A gap-fill: the Messages a client missed, and whether more remain. */
+export interface MessageGap {
+  /** Oldest first -- the order the client folds them in and advances its cursor by. */
+  messages: Message[];
+  /**
+   * True when the gap was wider than one page. The caller syncs again from the
+   * Sequence of the last Message here; false is what makes a drain terminate.
+   */
+  hasMore: boolean;
+}
+
+/**
+ * Reads the Messages a client missed while it was away, oldest first.
+ *
+ * This is the real guarantee behind reconnection. The transport's own
+ * short-gap recovery is a fast path that expires -- it holds a buffer for a
+ * couple of minutes and gives up -- so it cannot be what the promise "nothing
+ * is lost" rests on. This can, because it asks the database rather than a
+ * buffer: the client reports the highest Sequence it holds and receives
+ * precisely what lies above it, whether that gap is two seconds or two days
+ * wide.
+ *
+ * `after` is exclusive, which is what makes the sync exactly-once at the seam.
+ * The client's cursor names a Message it already holds; returning that Message
+ * again would deliver a duplicate on every reconnect. A client holding nothing
+ * passes 0, below every assigned Sequence (ADR-0002), so the same query serves
+ * a first sync and a resumed one rather than needing a special case.
+ *
+ * Ascending order is not cosmetic either: the client advances its cursor to the
+ * last Message it folded in, so a page delivered out of order would leave the
+ * cursor naming a Message with unrecovered Messages beneath it -- a gap that
+ * would never be asked for again.
+ *
+ * The membership guard runs first, and visibility is filtered exactly as in
+ * `readMessages` (ADR-0003) -- reconnect is another read route, not a way
+ * around the read model.
+ */
+export async function syncMessages({
+  userId,
+  conversationId,
+  after,
+}: {
+  userId: string;
+  conversationId: string;
+  after: bigint;
+}): Promise<MessageGap> {
+  await assertParticipant(userId, conversationId);
+
+  // One more than the page, so "is there another page" is answered by the same
+  // query rather than by a second count that could disagree with it.
+  const found = await prisma.message.findMany({
+    where: {
+      conversationId,
+      seq: { gt: after },
+      OR: [{ status: MessageStatus.VISIBLE }, { senderId: userId }],
+    },
+    orderBy: { seq: "asc" },
+    take: SYNC_PAGE_LIMIT + 1,
+  });
+
+  const hasMore = found.length > SYNC_PAGE_LIMIT;
+  return {
+    messages: hasMore ? found.slice(0, SYNC_PAGE_LIMIT) : found,
+    hasMore,
+  };
+}

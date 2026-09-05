@@ -6,7 +6,7 @@ import {
   NotAParticipantError,
 } from "../src/server/authorization.js";
 import { MessageStatus } from "@prisma/client";
-import { sendMessage } from "../src/server/messages.js";
+import { sendMessage, syncMessages } from "../src/server/messages.js";
 import { toWireMessage } from "../src/lib/wire.js";
 import type {
   ClientToServerEvents,
@@ -92,6 +92,55 @@ export function attachSocketServer(httpServer: HttpServer): ChatServer {
             return;
           }
           console.error("[socket] conversation:join failed", error);
+          callback({ ok: false, error: "INTERNAL" });
+        });
+    });
+
+    /**
+     * Fills the gap a disconnection left.
+     *
+     * The client reports the highest Sequence it holds and gets back precisely
+     * what lies above it. This is the durable half of the reconnection story:
+     * the transport's own recovery above replays a short in-memory buffer and
+     * expires after a couple of minutes, so it cannot be what "no Accepted
+     * Message is ever silently lost" rests on. This can, because it reads the
+     * database -- a client returning after an hour, or after the server was
+     * restarted and its buffers went with it, recovers the same way as one
+     * returning after two seconds.
+     *
+     * A client holding nothing sends null and is given the Conversation from
+     * the beginning, drained a page at a time.
+     */
+    socket.on("conversation:sync", (payload, callback) => {
+      // Parsed here rather than trusted: `since` crosses the wire as a string
+      // (ADR-0006), and a malformed one must be a refusal rather than a throw
+      // that takes the connection down.
+      let after: bigint;
+      try {
+        after = payload.since === null ? 0n : BigInt(payload.since);
+      } catch {
+        callback({ ok: false, error: "INTERNAL" });
+        return;
+      }
+
+      syncMessages({
+        userId,
+        conversationId: payload.conversationId,
+        after,
+      })
+        .then((gap) => {
+          callback({
+            ok: true,
+            messages: gap.messages.map(toWireMessage),
+            hasMore: gap.hasMore,
+          });
+        })
+        .catch((error: unknown) => {
+          if (error instanceof NotAParticipantError) {
+            callback({ ok: false, error: "NOT_A_PARTICIPANT" });
+            return;
+          }
+          console.error("[socket] conversation:sync failed", error);
           callback({ ok: false, error: "INTERNAL" });
         });
     });

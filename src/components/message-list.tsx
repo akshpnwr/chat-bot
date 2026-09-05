@@ -266,6 +266,12 @@ export function MessageList({
                 )}
               >
                 <div
+                  // A stable hook for the browser tests, which have to count
+                  // how many times a Message is on screen rather than merely
+                  // find it -- a duplicate delivered by reconnection would
+                  // satisfy "is visible" and is exactly what they rule out.
+                  data-message-body
+                  data-pending={entry.pending ? "true" : undefined}
                   className={cn(
                     "max-w-[85%] rounded-[12px] px-3 py-2 text-[14px] leading-5 break-words whitespace-pre-wrap sm:max-w-[70%]",
                     mine

@@ -58,6 +58,16 @@ export function ConversationView({
     };
   }, [socket, router]);
 
+  // Messages recovered after a disconnection never pass through `message:new`,
+  // so without this the list would keep showing whatever preview was current
+  // when the connection dropped -- the open Conversation caught up while the
+  // list beside it still described the outage. Refreshing as recovery ends
+  // covers every Conversation, including ones the reader does not have open.
+  useEffect(() => {
+    if (conversation.syncing) return;
+    router.refresh();
+  }, [conversation.syncing, router]);
+
   return (
     <div className="flex h-dvh w-full flex-col">
       <header className="flex shrink-0 flex-wrap items-center justify-between gap-3 px-4 py-3 shadow-[0_1px_0_0_rgb(0_0_0/0.08)] sm:px-6">
@@ -78,7 +88,7 @@ export function ConversationView({
           <h2 className="text-[14px] leading-5">{viewerName}</h2>
         </div>
         <div className="flex items-center gap-4">
-          <ConnectionBadge status={status} />
+          <ConnectionBadge status={status} syncing={conversation.syncing} />
           <Button
             variant="secondary"
             size="sm"
@@ -158,8 +168,16 @@ export function ConversationView({
                 />
               )}
 
+              {/*
+                Writable while disconnected, deliberately. The outbox records a
+                Message durably before it goes near the socket and the next
+                reconnection retries it under its original Client Message Id, so
+                writing offline is safe -- and a composer that locks the moment
+                the network dips is the thing that would actually lose what
+                somebody was typing.
+              */}
               <div className="shrink-0 shadow-[0_-1px_0_0_rgb(0_0_0/0.08)]">
-                <Composer onSend={conversation.send} disabled={status !== "connected"} />
+                <Composer onSend={conversation.send} offline={status !== "connected"} />
               </div>
             </>
           )}

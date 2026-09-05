@@ -92,6 +92,20 @@ export function applyPending(
     createdAt: string;
   },
 ): ConversationState {
+  // A Message already held is left exactly as it is.
+  //
+  // The retry path is why. After a reload, the outbox re-renders every
+  // unacknowledged Message as pending -- and by then the Conversation may
+  // already hold that Message, either as the entry written before the reload or
+  // as an Accepted one the reconnect sync recovered. Appending regardless would
+  // show the sender their own Message twice, and overwriting would drag an
+  // Accepted Message back into "Sending...". Neither is something a retry is
+  // entitled to do, so a Message the Conversation knows about is left alone.
+  const held = state.entries.some(
+    (entry) => entry.clientMessageId === message.clientMessageId,
+  );
+  if (held) return state;
+
   const entry: ConversationEntry = {
     seq: null,
     id: null,
@@ -193,4 +207,60 @@ export function highestSequence(state: ConversationState): Sequence | null {
     if (entry.seq !== null) held.push(entry.seq);
   }
   return maxSequence(held);
+}
+
+/**
+ * Folds in the Messages a client missed while it was disconnected.
+ *
+ * This is the same fold as a live Message, applied to a batch -- deliberately,
+ * because the two paths overlap. A reconnecting socket joins its rooms and
+ * starts receiving broadcasts before, during, or after its sync reply comes
+ * back, so a Message that arrived at the moment of reconnection can reach the
+ * client by both routes. Sharing `merge` is what makes that overlap invisible:
+ * the second arrival matches the first on its id or Client Message Id and
+ * replaces it rather than appending a duplicate.
+ *
+ * Ordering comes from the Sequence, not from arrival, so a gap that lands after
+ * a live Message still reads in the order it was written rather than in the
+ * order the network happened to deliver it.
+ *
+ * `nextCursor` and `reachedStart` are untouched. They describe how far back the
+ * reader has walked, and a gap is newer history -- moving them would either
+ * claim history that was never fetched or re-fetch a page already held.
+ */
+export function applySyncGap(
+  state: ConversationState,
+  /** Oldest first, as `syncMessages` returns them. */
+  gap: WireMessage[],
+): ConversationState {
+  return gap.reduce(merge, state);
+}
+
+/**
+ * Marks a Message as being retried, so what the sender sees matches what is
+ * actually happening.
+ *
+ * A failed send stays in the outbox and goes back on the wire at the next
+ * reconnection. Without this, it would still be showing "Not delivered" while
+ * it was in flight -- telling the sender the opposite of the truth, and leaving
+ * them no way to know a retry had ever been attempted.
+ *
+ * An Accepted Message is left exactly as it is: the reconnect sync may have
+ * settled it moments before the retry loop reached it, and dragging a delivered
+ * Message back into "Sending..." would undo that.
+ */
+export function applyRetrying(
+  state: ConversationState,
+  clientMessageId: string,
+): ConversationState {
+  let changed = false;
+  const entries = state.entries.map((entry) => {
+    if (entry.clientMessageId !== clientMessageId) return entry;
+    // Accepted, so there is nothing to retry and nothing to re-mark.
+    if (entry.seq !== null) return entry;
+    changed = true;
+    return { ...entry, pending: true, failed: false };
+  });
+
+  return changed ? { ...state, entries } : state;
 }

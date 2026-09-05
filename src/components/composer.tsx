@@ -10,13 +10,19 @@ import { Button } from "@/components/ui/button";
  * optimistically and settles it when the server acks, so the composer clears
  * immediately rather than waiting for a round trip. That is what makes the
  * Conversation feel instant on a slow connection.
+ *
+ * It stays writable while offline. The caller records a Message durably before
+ * it goes near the socket and retries it on reconnection, so what an outage
+ * costs is a delay rather than the Message -- and a box that locks itself the
+ * moment the network dips would discard whatever was half-typed in it.
  */
 export function Composer({
   onSend,
-  disabled,
+  offline = false,
 }: {
   onSend: (body: string) => void;
-  disabled: boolean;
+  /** Changes what the box says, never whether it accepts what is typed. */
+  offline?: boolean;
 }) {
   const [value, setValue] = useState("");
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -42,8 +48,9 @@ export function Composer({
         ref={inputRef}
         rows={1}
         value={value}
-        disabled={disabled}
-        placeholder={disabled ? "Reconnecting…" : "Write a message"}
+        placeholder={
+          offline ? "Offline - messages will send when you reconnect" : "Write a message"
+        }
         aria-label="Message"
         onChange={(event) => {
           setValue(event.target.value);
@@ -63,7 +70,7 @@ export function Composer({
         }}
         className="bg-elevated text-foreground placeholder:text-muted shadow-border max-h-40 min-h-10 flex-1 resize-none rounded-[6px] px-3 py-2 text-[14px] leading-5 outline-none focus-visible:shadow-[0_0_0_2px_#fff,0_0_0_4px_var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-50"
       />
-      <Button type="submit" size="sm" disabled={disabled || value.trim().length === 0}>
+      <Button type="submit" size="sm" disabled={value.trim().length === 0}>
         Send
       </Button>
     </form>

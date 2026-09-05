@@ -11,7 +11,12 @@ export default defineConfig({
   test: {
     globalSetup: ["./tests/setup/global-setup.ts"],
     setupFiles: ["./tests/setup/env.ts"],
+    // The browser-driven suite is excluded: it boots a real server and drives
+    // real browsers against the development database, which is a different
+    // shape of run with a different database. `npm run test:browser` is its
+    // entry point.
     include: ["tests/**/*.test.ts"],
+    exclude: ["tests/browser/**"],
     // Every test file shares one Postgres branch, so they run one at a time
     // rather than racing each other's truncations.
     fileParallelism: false,

@@ -1,3 +1,4 @@
+import type { Sequence } from "./sequence";
 import type { WireMessage } from "./wire";
 
 /**
@@ -30,6 +31,20 @@ export interface ServerToClientEvents {
  */
 export type SendError = "NOT_A_PARTICIPANT" | "INTERNAL";
 
+/** The reply to a sync: the Messages missed, or why the gap could not be read. */
+export type SyncReply =
+  | {
+      ok: true;
+      /** Oldest first, so the client folds them in and advances its cursor in one pass. */
+      messages: WireMessage[];
+      /**
+       * True when the gap was wider than one page. The client syncs again from
+       * the Sequence it now holds; false is what ends the drain.
+       */
+      hasMore: boolean;
+    }
+  | { ok: false; error: SendError };
+
 /** The ack for a send: the Accepted Message, or why it was refused. */
 export type SendReply =
   | { ok: true; message: WireMessage }
@@ -44,6 +59,18 @@ export interface ClientToServerEvents {
   "conversation:join": (
     payload: { conversationId: string },
     callback: (reply: { ok: true } | { ok: false; error: string }) => void,
+  ) => void;
+  /**
+   * Ask for the Messages missed while away, from the Sync Cursor forward.
+   *
+   * `since` is the highest Sequence the client actually holds, or null when it
+   * holds none -- null rather than "0" because a client claiming a Sequence it
+   * does not hold is precisely how a reconnect skips Messages it never
+   * received (CONTEXT.md: Sync Cursor).
+   */
+  "conversation:sync": (
+    payload: { conversationId: string; since: Sequence | null },
+    callback: (reply: SyncReply) => void,
   ) => void;
   /**
    * Send a Message. The Client Message Id is generated in the browser before
