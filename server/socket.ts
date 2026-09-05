@@ -5,6 +5,9 @@ import {
   assertParticipant,
   NotAParticipantError,
 } from "../src/server/authorization.js";
+import { MessageStatus } from "@prisma/client";
+import { sendMessage } from "../src/server/messages.js";
+import { toWireMessage } from "../src/lib/wire.js";
 import type {
   ClientToServerEvents,
   ServerToClientEvents,
@@ -89,6 +92,53 @@ export function attachSocketServer(httpServer: HttpServer): ChatServer {
             return;
           }
           console.error("[socket] conversation:join failed", error);
+          callback({ ok: false, error: "INTERNAL" });
+        });
+    });
+
+    /**
+     * A send is one round trip: the Message is Accepted -- durably stored --
+     * before the ack returns, so a client that receives `ok` knows the system
+     * has taken responsibility for it (CONTEXT.md: Accepted).
+     *
+     * The broadcast goes to the whole room including the sender, rather than
+     * to everyone else. The sender's own tab settles its pending Message from
+     * the ack, but its *other* tabs have no ack to settle from, and they need
+     * the Message just as the recipient does. Delivering to the room is what
+     * makes those two cases one case.
+     *
+     * The sender id comes from the connection, never the payload, so the
+     * Message is attributed to whoever the handshake established.
+     */
+    socket.on("message:send", (payload, callback) => {
+      sendMessage({
+        senderId: userId,
+        conversationId: payload.conversationId,
+        clientMessageId: payload.clientMessageId,
+        body: payload.body,
+      })
+        .then((message) => {
+          const wire = toWireMessage(message);
+          // The ack always carries the Message back to whoever sent it -- that
+          // is how their pending Message settles, and a sender may see their
+          // own Message at any status.
+          callback({ ok: true, message: wire });
+
+          // The room, however, includes the recipient, so the broadcast is
+          // gated on visibility (ADR-0003). Text is written VISIBLE and passes
+          // straight through; when #9 starts writing images at PENDING, this is
+          // already the gate that holds them back rather than a line somebody
+          // has to remember to add.
+          if (message.status === MessageStatus.VISIBLE) {
+            io.to(conversationRoom(message.conversationId)).emit("message:new", wire);
+          }
+        })
+        .catch((error: unknown) => {
+          if (error instanceof NotAParticipantError) {
+            callback({ ok: false, error: "NOT_A_PARTICIPANT" });
+            return;
+          }
+          console.error("[socket] message:send failed", error);
           callback({ ok: false, error: "INTERNAL" });
         });
     });

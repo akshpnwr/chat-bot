@@ -13,7 +13,17 @@ const { openConversation } = await import("../src/server/conversations.js");
 export const DEMO_USERS = [
   { email: "ada@example.com", name: "Ada Lovelace", password: "demo-password-1" },
   { email: "grace@example.com", name: "Grace Hopper", password: "demo-password-2" },
+  // A third account so the bulk Conversation sits in its own thread, leaving
+  // the Ada/Grace thread short enough to read.
+  { email: "alan@example.com", name: "Alan Turing", password: "demo-password-3" },
 ] as const;
+
+/**
+ * How many Messages the bulk Conversation holds. The requirement is that a
+ * Conversation of 10,000 opens and scrolls without stutter, so the seed
+ * produces exactly that rather than a number a reviewer has to take on trust.
+ */
+const BULK_MESSAGE_COUNT = 10_000;
 
 /**
  * Credentials are created through better-auth's own sign-up API rather than by
@@ -84,14 +94,51 @@ async function pruneOrphanedConversations() {
   console.log(`[seed] pruned ${ids.length} conversation(s) with under two Participants`);
 }
 
+/**
+ * Fills a Conversation to `BULK_MESSAGE_COUNT` Messages, so the virtualized
+ * list can be judged against the size the requirement names.
+ *
+ * Written with createMany in batches rather than through sendMessage: the
+ * service is the right path for one Message and the wrong one for ten thousand,
+ * where a round trip each would take minutes. Idempotency still holds -- the
+ * Client Message Ids are deterministic, and skipDuplicates leans on the same
+ * unique constraint the service does, so re-running the seed tops the thread up
+ * rather than doubling it.
+ */
+async function ensureBulkMessages(conversationId: string, senderIds: string[]) {
+  const existing = await prisma.message.count({ where: { conversationId } });
+  if (existing >= BULK_MESSAGE_COUNT) {
+    console.log(`[seed] bulk conversation already holds ${existing} messages`);
+    return;
+  }
+
+  const BATCH = 1_000;
+  for (let start = existing; start < BULK_MESSAGE_COUNT; start += BATCH) {
+    const rows = [];
+    for (let index = start; index < Math.min(start + BATCH, BULK_MESSAGE_COUNT); index += 1) {
+      rows.push({
+        conversationId,
+        senderId: senderIds[index % senderIds.length]!,
+        // Varying length is the point: rows of uniform height would make the
+        // virtualizer's dynamic measurement look correct without exercising it.
+        body: `Message ${index + 1}. ${"Scrollback filler. ".repeat((index % 5) + 1)}`,
+        clientMessageId: `bulk-${index}`,
+      });
+    }
+    await prisma.message.createMany({ data: rows, skipDuplicates: true });
+  }
+
+  console.log(`[seed] bulk conversation filled to ${BULK_MESSAGE_COUNT} messages`);
+}
+
 async function main() {
   const users = [];
   for (const spec of DEMO_USERS) {
     users.push(await ensureUser(spec));
   }
 
-  const [ada, grace] = users;
-  if (!ada || !grace) throw new Error("Expected two demo users");
+  const [ada, grace, alan] = users;
+  if (!ada || !grace || !alan) throw new Error("Expected three demo users");
 
   await pruneOrphanedConversations();
   const conversation = await ensureConversation(ada.id, grace.id);
@@ -118,6 +165,9 @@ async function main() {
       },
     });
   }
+
+  const bulk = await ensureConversation(ada.id, alan.id);
+  await ensureBulkMessages(bulk.id, [ada.id, alan.id]);
 
   console.log("[seed] done");
 }
