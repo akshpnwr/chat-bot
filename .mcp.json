@@ -1,0 +1,37 @@
+{
+  "mcpServers": {
+    "better-auth": {
+      "type": "http",
+      "url": "https://mcp.better-auth.com/mcp"
+    },
+    "context7": {
+      "type": "http",
+      "url": "https://mcp.context7.com/mcp"
+    },
+    "neon": {
+      "type": "http",
+      "url": "https://mcp.neon.tech/mcp"
+    },
+    "prisma": {
+      "type": "http",
+      "url": "https://mcp.prisma.io/mcp"
+    },
+    "playwright": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@playwright/mcp@latest"
+      ]
+    },
+    "shadcn": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "shadcn@latest",
+        "mcp"
+      ]
+    }
+  }
+}
