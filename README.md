@@ -228,7 +228,7 @@ What each group is for:
 | `BETTER_AUTH_URL` | yes | The app's own origin (`http://localhost:3000` locally) |
 | `STORAGE_*` | yes, for images | S3-compatible bucket; uploads go browser-to-bucket, never through the app server |
 | `TEST_DATABASE_URL` / `TEST_DIRECT_URL` | for `npm test` | A **disposable** branch — the suite truncates it |
-| `GIFS_API_KEY` | no | Unset is a supported state: the GIF tab reports itself unavailable and stickers still work |
+| `GIFS_API_KEY` | no | Read but inert — the provider it addressed no longer exists (see [Known gaps](#known-gaps)) |
 
 Then:
 
@@ -355,9 +355,14 @@ enough to be backed by Redis without changing its callers.
 ### Known gaps
 
 - **No screen recording yet** — the required demo capture (real-time messaging between two
-  accounts, typing, presence, unread counts, GIFs and stickers, both moderation paths, and recovery
-  from a disconnection) has not been recorded.
-- **GIF search is unavailable on the deployment.** `GIFS_API_KEY` is unset there, which is a
-  supported state rather than a fault: stickers are bundled and work, and the GIF tab reports
-  itself unavailable. Setting the key on the service enables it with no redeploy of the code.
+  accounts, typing, presence, unread counts, stickers, both moderation paths, and recovery from a
+  disconnection) has not been recorded. GIFs are absent from that list deliberately: see the gap
+  below.
+- **GIF search does not work anywhere, and cannot be made to.** It was built against the Tenor
+  API, which Google shut down on 30 June 2026: signups closed that January and existing agreements
+  expired with the service, so there is no key that would enable this — `GIFS_API_KEY` is read but
+  has nothing left to address. What the application does instead is the designed behaviour rather
+  than a fault: stickers are bundled, need no credential, and work, and the GIF tab reports itself
+  unavailable. Restoring GIFs means a second adapter behind `gifProvider()` pointed at a provider
+  that still issues keys — [#17](../../issues/17).
 - **The browser-driven suite is not dependable** — [#14](../../issues/14).
