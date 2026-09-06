@@ -164,6 +164,27 @@ export function useConversation(
   const stateRef = useRef(state);
   stateRef.current = state;
 
+  /**
+   * Whether the opening page of history has landed for the Conversation now
+   * open.
+   *
+   * This is what separates a cold open from a reconnection, and the two are
+   * genuinely different events however similar they look from inside the sync
+   * loop. A reconnection resumes a client that has been holding Messages all
+   * along, so its Sync Cursor is a fact: "everything above this, please". A
+   * cold open has no such fact yet -- the first page is still in flight -- and
+   * a client with nothing held reports a cursor of 0, which the read model
+   * quite correctly reads as "send the Conversation from its beginning"
+   * (ADR-0002).
+   *
+   * On a Conversation of any real size that is a drain of thousands of
+   * Messages nobody asked for, appended below the reader as they read. The
+   * cursor cannot express the difference on its own, because the absence of a
+   * cursor is ambiguous between "I hold nothing" and "I do not know yet" --
+   * so the distinction is recorded here instead, where it is unambiguous.
+   */
+  const openedRef = useRef(false);
+
   // Resolved on the client only. `localStorage` does not exist during the
   // server render, so reading it at module scope would break hydration.
   const outboxRef = useRef<OutboxStore | null>(null);
@@ -243,6 +264,11 @@ export function useConversation(
 
     let cancelled = false;
     inFlightRef.current = false;
+    // Lowered before the fetch rather than after it: from here until the page
+    // lands this client genuinely does not know what it holds, and that is
+    // precisely the window in which a sync must not treat "nothing held" as
+    // "send everything".
+    openedRef.current = false;
     setState(emptyConversation());
     setLoading(true);
     setError(null);
@@ -257,11 +283,21 @@ export function useConversation(
         // away from must not overwrite the one they are now looking at.
         if (cancelled) return;
         setState((current) => applyOlderPage(current, page.messages, page.nextCursor));
+        // What this client holds is now a fact, so a sync from here on is a
+        // resumption rather than a cold open. Raised alongside the state it
+        // describes, so the two can never disagree.
+        openedRef.current = true;
       })
       .catch((cause: unknown) => {
         if (cancelled) return;
         console.error("[conversation] loading history failed", cause);
         setError("Could not load this conversation.");
+        // Raised on failure too. The opening page never arrived, so the client
+        // holds nothing -- but a cursor of 0 is then the truth rather than an
+        // artefact of a race, and a reconnection is the reader's only route
+        // back to a Conversation that failed to load. Leaving this lowered
+        // would make that failure permanent for as long as the view stays open.
+        openedRef.current = true;
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -471,9 +507,16 @@ export function useConversation(
    *
    * Runs on every connect, the first included -- a fresh page load and a
    * reconnection differ only in how much the client already holds, and the
-   * cursor already expresses that difference. Making them one path means
-   * recovery is exercised on every load rather than only in the rare case, so
-   * it cannot quietly rot into something that fails when it is finally needed.
+   * cursor expresses that difference *once the client knows what it holds*.
+   * Making them one path means recovery is exercised on every load rather than
+   * only in the rare case, so it cannot quietly rot into something that fails
+   * when it is finally needed.
+   *
+   * That qualification is load-bearing. This effect and the first-page fetch
+   * are independent, so on a cold open this one can reach the cursor while the
+   * page is still in flight and read a Conversation holding nothing -- a cursor
+   * of 0, which asks the server for the Conversation from its beginning. The
+   * join is therefore held until the opening page has landed; see `openedRef`.
    *
    * The order within it matters. Syncing before retrying means a Message this
    * browser sent but never saw acked -- one the server may well have Accepted,
@@ -485,6 +528,10 @@ export function useConversation(
    */
   useEffect(() => {
     if (!socket || !conversationId) return;
+    // Nothing to resume from yet: the opening page is still in flight, and
+    // syncing now would ask for the Conversation from its beginning. The
+    // effect re-runs when `loading` settles, which is when this becomes true.
+    if (!openedRef.current) return;
 
     let cancelled = false;
 
@@ -680,7 +727,10 @@ export function useConversation(
       cancelled = true;
       socket.off("connect", runRecovery);
     };
-  }, [socket, conversationId, viewerId, emitSend]);
+    // `loading` is a dependency so this effect re-runs when the opening page
+    // settles, which is the moment the guard above stops holding it back. It
+    // is not otherwise read here -- it is the edge that matters, not the value.
+  }, [socket, conversationId, viewerId, emitSend, loading]);
 
   useEffect(() => {
     if (!socket || !conversationId) return;

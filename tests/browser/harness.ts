@@ -289,8 +289,17 @@ export async function signIn(
   const page = await context.newPage();
 
   await page.goto(`${BASE_URL}/sign-in`);
-  await page.getByLabel("Email").fill(email);
-  await page.getByLabel("Password").fill(password);
+  // Addressed by role as well as name. The page lists the demo accounts with a
+  // "Copy <address> email" button beside each, and a name-only match finds
+  // those buttons too -- three elements, which Playwright refuses to guess
+  // between. Naming the role picks the field out unambiguously.
+  // Both fields are addressed as form controls rather than by label. The page
+  // lists the demo accounts with "Copy <address> email" and "Copy <address>
+  // password" buttons beside each, and a label match finds those too -- three
+  // elements, which Playwright refuses to guess between. A password input has
+  // no `textbox` role, so the two are located the same way for consistency.
+  await page.locator('input[name="email"]').fill(email);
+  await page.locator('input[name="password"]').fill(password);
   await page.getByRole("button", { name: /sign in/i }).click();
 
   // The form reports a refused sign-in in its own alert and simply stays put,
