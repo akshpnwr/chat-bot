@@ -29,17 +29,18 @@ import {
  * on a cold open that is decided by effect ordering inside a mounted component.
  * A unit test at either seam would have passed against the bug.
  *
- * KNOWN LIMITATION -- read before trusting a green run here. These assertions
- * have never been observed to fail against the unfixed client. The defect
- * reproduces reliably against the dev server (`scripts/bottom-probe.mjs`, red on
- * every run, with the sync cursor arriving as `null`), but this suite builds and
- * serves the production bundle, where the first page consistently wins the race
- * and the drain does not occur. So this file currently documents the guarantee
- * and would catch a gross regression -- a cold open that syncs from the
- * beginning under production timing -- but it is not proven red-capable, and it
- * should not be read as proof the fix works. The probe is what demonstrated
- * that. Anyone able to make the production build reproduce the drain should
- * confirm these go red without the fix and delete this notice.
+ * These assertions are proven red-capable: with the guard removed from
+ * `use-conversation.ts` they fail here, reporting a first cursor of `null`
+ * followed by rounds walking `204, 404, 604, ...` and a Conversation grown past
+ * 119,000px. With the guard in place they pass.
+ *
+ * That took one deliberate intervention, and it is `HISTORY_DELAY_MS` below.
+ * The defect is a race, and against a production build on a fast machine the
+ * first page wins it by a comfortable margin -- measured at 580ms even when the
+ * socket connected first -- so an unmodified run is green whether the fix is
+ * present or not. That is not the bug being absent; it is the bug being
+ * invisible, which is precisely how it reached a user in the first place. The
+ * delay widens the window the defect already lives in rather than creating one.
  */
 
 const ADA = { email: "ada@example.com", password: "demo-password-1" };
@@ -58,6 +59,17 @@ const BULK_PARTICIPANT = "Alan";
 
 /** How many Messages the seed puts in that Conversation. */
 const BULK_MESSAGE_COUNT = 10_000;
+
+/**
+ * How long the opening page of history is held back, to hold the race open long
+ * enough to observe.
+ *
+ * Three seconds is chosen against a measurement rather than by feel: on this
+ * suite's production build the socket and the first page land within roughly
+ * 600ms of each other, so the delay has to clear that comfortably to put the
+ * sync first every run. It costs the two tests below three seconds each.
+ */
+const HISTORY_DELAY_MS = 3_000;
 
 let server: RunningServer;
 let browser: Browser;
@@ -131,6 +143,21 @@ async function openBulkConversation(client: Client): Promise<void> {
  * and then opening this Conversation before any other.
  */
 async function coldOpenBulkConversation(client: Client): Promise<void> {
+  // Holds back ONLY the opening page of history, so the sync effect reaches the
+  // Sync Cursor while the client still does not know what it holds. Nothing
+  // else is delayed, and the client is otherwise untouched: the request goes to
+  // the real server and returns the real page, just later.
+  //
+  // Without this the test cannot fail. The race is genuinely there in
+  // production -- it is what the user hit -- but the first page usually wins,
+  // so asserting on an unmodified run measures machine speed rather than the
+  // code. Widening a real window is what makes the assertion mean something;
+  // the alternative is a test that passes for reasons unrelated to the fix.
+  await client.page.route("**/messages?limit=*", async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, HISTORY_DELAY_MS));
+    await route.continue();
+  });
+
   await client.page.reload();
   await client.page.waitForSelector('[role="log"]', { timeout: 30_000 });
   await openBulkConversation(client);
