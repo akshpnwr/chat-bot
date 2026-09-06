@@ -36,6 +36,20 @@ client that retries steadily push the window's oldest entry forward forever and 
 readmitted — turning a limit into a permanent lockout, and punishing exactly the client that
 backs off least.
 
+**A release names the attempt it undoes.** `consume` returns a handle and `release` takes it back,
+rather than releasing "the most recent attempt". Without that, two overlapping requests from one
+key alias: the first to finish releases whichever attempt is newest, which may be the *other*
+request's, leaving that one unrecorded while it proceeds. A client interleaving one cheap failure
+per real request could then keep its allowance permanently empty and never be limited at all — the
+limit would look enforced and not be. A handle that is not held is ignored, so a repeated or stale
+release refunds nothing.
+
+The sign-in throttle has the same hazard in a different shape, because Better Auth's before and
+after hooks do not pass a value between them, so the handle cannot be carried directly from the
+consume to the release. It keeps its own per-address list of attempts awaiting a verdict and
+releases the **oldest**: two people signing into one address at once each release one slot, and a
+concurrent attacker's guess — which arrived later and failed — is not the one refunded.
+
 ## A sliding window rather than a fixed one
 
 A fixed window resets on a boundary, so a caller who spends their whole allowance just before it
@@ -77,6 +91,17 @@ A rate-limited send stays in the outbox and is rendered as still pending. It is 
 that becomes acceptance simply by waiting, so unlike prohibited language or a bad asset key it is
 not dropped — the client waits out the stated interval and sends it again under the same Client
 Message Id.
+
+That timer and the reconnection replay must not both own the same entry. The replay walks the
+outbox and re-emits everything it finds, so an entry mid-backoff would be sent twice — once by the
+replay and once when the timer fires — and both would spend a slot from the limiter being backed
+off from, making the flood worse rather than better. So the replay skips entries a timer holds,
+and the timers are cleared when the socket is replaced, which hands those entries back to the
+replay rather than leaving them to fire at a disposed socket.
+
+The sign-in form backs off too: a throttled refusal disables the button for the interval the
+server named and counts it down. Without that the form is immediately re-submittable, and a person
+hammering it merely renews their own refusal.
 
 ## Consequences
 

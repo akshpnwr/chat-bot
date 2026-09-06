@@ -52,7 +52,16 @@ export interface SignInThrottle {
    * Returns a refusal, or null to proceed.
    */
   attempt: (email: unknown) => ThrottleRefusal | null;
-  /** Un-records the attempt for an address whose credentials were right. */
+  /**
+   * Un-records the attempt for an address whose credentials turned out right.
+   *
+   * The attempt is found by the address rather than passed back from the hook,
+   * because Better Auth's before and after hooks do not share a value. What
+   * makes that safe is that each address's attempts are held in arrival order
+   * and the *oldest* live one is released: two people signing into the same
+   * address at once each release one slot, and an attacker's guess -- which
+   * arrived later and failed -- is not the one freed.
+   */
   succeeded: (email: unknown) => void;
 }
 
@@ -77,6 +86,20 @@ export function createSignInThrottle(
 ): SignInThrottle {
   const limiter = createRateLimiter(rule, now);
 
+  /**
+   * The handles of attempts still awaiting a verdict, oldest first per address.
+   *
+   * Better Auth runs the before and after hooks as separate calls with no value
+   * passed between them, so the handle `consume` returned cannot be handed to
+   * the release directly. Holding it here is what closes that gap.
+   *
+   * An entry is removed when its attempt is released, and abandoned entries
+   * cannot accumulate without bound: the list for an address is never longer
+   * than the limit, because an address at its limit is refused and a refusal
+   * records nothing to remember.
+   */
+  const awaiting = new Map<string, number[]>();
+
   return {
     attempt(email) {
       const key = keyFor(email);
@@ -87,7 +110,12 @@ export function createSignInThrottle(
       if (key === null) return null;
 
       const decision = limiter.consume(key);
-      if (decision.allowed) return null;
+      if (decision.allowed) {
+        const held = awaiting.get(key);
+        if (held) held.push(decision.attempt);
+        else awaiting.set(key, [decision.attempt]);
+        return null;
+      }
 
       return {
         message: SIGN_IN_THROTTLE_MESSAGE,
@@ -98,7 +126,20 @@ export function createSignInThrottle(
     succeeded(email) {
       const key = keyFor(email);
       if (key === null) return;
-      limiter.release(key);
+
+      const held = awaiting.get(key);
+      // Nothing awaiting means no attempt of ours to release -- a success
+      // reported without a matching attempt, or one whose attempt already aged
+      // out of the window.
+      if (held === undefined || held.length === 0) return;
+
+      // The oldest, because attempts are appended in arrival order and this
+      // success is the earliest one still unresolved. Releasing the newest
+      // would hand the refund to a concurrent guess rather than to the person
+      // who actually signed in.
+      const attempt = held.shift()!;
+      if (held.length === 0) awaiting.delete(key);
+      limiter.release(key, attempt);
     },
   };
 }

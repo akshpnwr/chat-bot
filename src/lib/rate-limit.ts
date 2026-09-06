@@ -37,7 +37,25 @@ export interface RateLimitRule {
  * immediately -- which is precisely the hammering the limit exists to stop.
  */
 export type RateLimitDecision =
-  | { allowed: true }
+  | {
+      allowed: true;
+      /**
+       * Identifies the attempt this call recorded, so it can be released
+       * again.
+       *
+       * A handle rather than nothing, because a release has to be able to name
+       * *which* attempt it is undoing. Two requests from one key can overlap --
+       * two tabs, or a composer firing twice -- and a release that dropped
+       * merely the newest would free the other request's slot while that
+       * request was still in flight. A client interleaving one cheap failure
+       * per real request could then keep its allowance permanently empty and
+       * never be limited at all.
+       *
+       * It is the attempt's timestamp, which is what the window already stores,
+       * so identifying an attempt costs no extra state.
+       */
+      attempt: number;
+    }
   | { allowed: false; retryAfterMs: number };
 
 export interface RateLimiter {
@@ -51,15 +69,19 @@ export interface RateLimiter {
    */
   consume: (key: string) => RateLimitDecision;
   /**
-   * Un-records the most recent attempt for a key.
+   * Un-records one attempt, named by the handle `consume` returned for it.
    *
    * This is what lets sign-in throttling count only *failures*: the attempt is
    * consumed before the password is checked, so a flood is refused without the
    * check ever running, and released again when the credentials turn out to be
    * right. Consuming afterwards instead would mean the expensive verification
    * happens first, which is the work the throttle exists to protect.
+   *
+   * Naming the attempt is what makes that safe when requests overlap -- see
+   * `attempt` on the decision. A handle that is not held is ignored, so a
+   * double release refunds nothing and a stale one frees nobody else's slot.
    */
-  release: (key: string) => void;
+  release: (key: string, attempt: number) => void;
   /** The keys currently holding attempts. Exposed for tests and diagnostics. */
   trackedKeys: () => string[];
 }
@@ -129,16 +151,28 @@ export function createRateLimiter(
         return { allowed: false, retryAfterMs: Math.max(1, retryAfterMs) };
       }
 
-      live.push(now());
+      const attempt = now();
+      live.push(attempt);
       attempts.set(key, live);
-      return { allowed: true };
+      return { allowed: true, attempt };
     },
 
-    release(key) {
+    release(key, attempt) {
       const live = sweepAndRead(key);
       if (live.length === 0) return;
 
-      live.pop();
+      // Found by identity rather than popped, so a release frees the attempt it
+      // names and no other. A handle that is not held -- already released, or
+      // aged out of the window -- matches nothing and is ignored, which is what
+      // stops a stale or repeated release refunding a slot that was never spent.
+      const index = live.indexOf(attempt);
+      if (index === -1) return;
+
+      // Exactly one, even where two attempts share a timestamp: `splice`
+      // removes a single entry, so two calls in the same millisecond release
+      // one slot each rather than one call releasing both.
+      live.splice(index, 1);
+
       // Deleted rather than left empty, so releasing the only attempt does not
       // leave a key behind that nothing will ever sweep.
       if (live.length === 0) attempts.delete(key);

@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { signIn } from "@/lib/auth-client";
@@ -12,9 +12,33 @@ export default function SignInPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  /**
+   * Seconds left before a throttled sign-in may be tried again, or zero.
+   *
+   * The server refuses repeated failures and says when to come back; holding
+   * that here is what makes the form honour it. Without it the button is
+   * immediately re-submittable and a person hammering it merely renews their
+   * own refusal -- which is the behaviour the throttle exists to stop.
+   */
+  const [waitSeconds, setWaitSeconds] = useState(0);
+
+  // Counts the wait down so the button re-enables on its own.
+  //
+  // One interval for as long as a wait is outstanding, cleared when it reaches
+  // zero. The tick reads the previous value rather than closing over
+  // `waitSeconds`, so the interval does not need re-creating each second.
+  const waiting = waitSeconds > 0;
+  useEffect(() => {
+    if (!waiting) return;
+    const timer = setInterval(() => {
+      setWaitSeconds((remaining) => Math.max(0, remaining - 1));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [waiting]);
 
   async function onSubmit(event: React.FormEvent) {
     event.preventDefault();
+    if (pending || waitSeconds > 0) return;
     setPending(true);
     setError(null);
 
@@ -22,6 +46,17 @@ export default function SignInPage() {
 
     if (signInError) {
       setError(signInError.message ?? "Could not sign in.");
+      // A throttled refusal disables the button for as long as the server said,
+      // so the next attempt is one that can actually succeed. Read from the
+      // body, falling back to the standard header's seconds.
+      const refusal = signInError as { retryAfterMs?: number; status?: number };
+      if (refusal.status === 429) {
+        setWaitSeconds(
+          refusal.retryAfterMs === undefined
+            ? 60
+            : Math.ceil(refusal.retryAfterMs / 1000),
+        );
+      }
       setPending(false);
       return;
     }
@@ -71,8 +106,12 @@ export default function SignInPage() {
           </p>
         ) : null}
 
-        <Button type="submit" disabled={pending}>
-          {pending ? "Signing in…" : "Sign in"}
+        <Button type="submit" disabled={pending || waitSeconds > 0}>
+          {pending
+            ? "Signing in…"
+            : waitSeconds > 0
+              ? `Try again in ${waitSeconds}s`
+              : "Sign in"}
         </Button>
       </form>
     </main>

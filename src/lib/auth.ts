@@ -54,11 +54,20 @@ export const auth = betterAuth({
       if (refusal === null) return;
 
       throw new APIError("TOO_MANY_REQUESTS", {
-        message: refusal.message,
-        // Carried so the client can back off for a stated interval rather than
-        // guess -- the same contract the socket and the upload route offer,
-        // spelled the way each transport spells it.
+        // The interval is in the message rather than only beside it, because
+        // this is the one refusal whose whole audience is a person reading a
+        // form. `retryAfterMs` is carried too, for a client that wants to
+        // disable the button rather than print a sentence.
+        message: `${refusal.message} (about ${Math.ceil(
+          refusal.retryAfterMs / 1000,
+        )} seconds)`,
         retryAfterMs: refusal.retryAfterMs,
+        // The standard header as well, so this path answers a 429 the same way
+        // the upload route does -- ADR-0008 claims both do, and an intermediary
+        // that understands backing off should not have to read our JSON.
+        headers: {
+          "Retry-After": String(Math.ceil(refusal.retryAfterMs / 1000)),
+        },
       });
     }),
     after: createAuthMiddleware(async (ctx) => {

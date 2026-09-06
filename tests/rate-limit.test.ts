@@ -141,8 +141,11 @@ describe("createRateLimiter", () => {
     const clock = fakeClock();
     const limiter = createRateLimiter({ limit: 2, windowMs: 1000 }, clock.now);
 
-    limiter.consume("ada@example.com");
-    limiter.release("ada@example.com");
+    const first = limiter.consume("ada@example.com");
+    expect(first.allowed).toBe(true);
+    if (!first.allowed) return;
+    limiter.release("ada@example.com", first.attempt);
+
     limiter.consume("ada@example.com");
     limiter.consume("ada@example.com");
 
@@ -153,8 +156,70 @@ describe("createRateLimiter", () => {
     const clock = fakeClock();
     const limiter = createRateLimiter({ limit: 1, windowMs: 1000 }, clock.now);
 
-    expect(() => limiter.release("nobody")).not.toThrow();
+    expect(() => limiter.release("nobody", 12345)).not.toThrow();
     expect(limiter.consume("nobody").allowed).toBe(true);
+  });
+
+  /**
+   * The bug this signature exists to prevent.
+   *
+   * Two requests from one key overlap -- two tabs, or a composer firing twice.
+   * The first fails validation and releases; the second is still in flight and
+   * must keep its slot. A release that dropped merely the *newest* attempt
+   * would free the second request's, leaving it unrecorded while it proceeds --
+   * so a client interleaving one malformed request per real one would keep its
+   * allowance permanently empty and never be limited at all.
+   */
+  it("releases the caller's own attempt, not whichever is newest", () => {
+    const clock = fakeClock();
+    const limiter = createRateLimiter({ limit: 2, windowMs: 1000 }, clock.now);
+
+    const first = limiter.consume("ada");
+    clock.advance(10);
+    limiter.consume("ada"); // still in flight, must keep its slot
+
+    expect(first.allowed).toBe(true);
+    if (!first.allowed) return;
+    limiter.release("ada", first.attempt);
+
+    // One attempt was released and one still stands, so exactly one slot is
+    // free -- not two.
+    expect(limiter.consume("ada").allowed).toBe(true);
+    expect(limiter.consume("ada").allowed).toBe(false);
+  });
+
+  it("ignores a release naming an attempt that is not held", () => {
+    const clock = fakeClock();
+    const limiter = createRateLimiter({ limit: 2, windowMs: 1000 }, clock.now);
+
+    const only = limiter.consume("ada");
+    expect(only.allowed).toBe(true);
+    if (!only.allowed) return;
+
+    // A stale handle -- already released, or from an aged-out window. It must
+    // not free somebody else's slot as a consolation.
+    limiter.release("ada", only.attempt + 99_999);
+
+    expect(limiter.consume("ada").allowed).toBe(true);
+    expect(limiter.consume("ada").allowed).toBe(false);
+  });
+
+  it("releases an attempt only once, however often it is named", () => {
+    const clock = fakeClock();
+    const limiter = createRateLimiter({ limit: 2, windowMs: 1000 }, clock.now);
+
+    const first = limiter.consume("ada");
+    clock.advance(10);
+    limiter.consume("ada");
+    expect(first.allowed).toBe(true);
+    if (!first.allowed) return;
+
+    // A double release must not refund a slot that was never spent.
+    limiter.release("ada", first.attempt);
+    limiter.release("ada", first.attempt);
+
+    expect(limiter.consume("ada").allowed).toBe(true);
+    expect(limiter.consume("ada").allowed).toBe(false);
   });
 });
 

@@ -120,6 +120,39 @@ describe("createSignInThrottle", () => {
     expect(throttle.attempt("   ")).toBeNull();
   });
 
+  /**
+   * Two people signing into the same address at once -- or an attacker guessing
+   * while the owner signs in. The success must release its own attempt and not
+   * the guess, or a guessing run could be sustained indefinitely by waiting for
+   * the owner to sign in.
+   */
+  it("does not let a success refund a concurrent failed guess", () => {
+    const throttle = createSignInThrottle({ limit: 3, windowMs: 1000 });
+
+    throttle.attempt("ada@example.com"); // the owner, will succeed
+    throttle.attempt("ada@example.com"); // a guess, will fail
+    throttle.attempt("ada@example.com"); // a guess, will fail
+    throttle.succeeded("ada@example.com");
+
+    // Two failed guesses still stand, so exactly one slot came back.
+    expect(throttle.attempt("ada@example.com")).toBeNull();
+    expect(throttle.attempt("ada@example.com")).not.toBeNull();
+  });
+
+  it("succeeding more often than attempted refunds nothing extra", () => {
+    const throttle = createSignInThrottle({ limit: 2, windowMs: 1000 });
+
+    throttle.attempt("ada@example.com");
+    throttle.succeeded("ada@example.com");
+    // No attempt outstanding; these must not manufacture allowance.
+    throttle.succeeded("ada@example.com");
+    throttle.succeeded("ada@example.com");
+
+    expect(throttle.attempt("ada@example.com")).toBeNull();
+    expect(throttle.attempt("ada@example.com")).toBeNull();
+    expect(throttle.attempt("ada@example.com")).not.toBeNull();
+  });
+
   it("succeeding on an address never attempted is harmless", () => {
     const throttle = createSignInThrottle({ limit: 1, windowMs: 1000 });
 

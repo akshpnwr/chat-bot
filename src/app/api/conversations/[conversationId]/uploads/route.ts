@@ -89,8 +89,9 @@ export async function POST(
     body = (await request.json()) as typeof body;
   } catch {
     // Released for the same reason as a failed validation below: nothing was
-    // signed, so nothing was spent.
-    uploadLimiter.release(session.user.id);
+    // signed, so nothing was spent. Named by its own handle, so a concurrent
+    // request from the same user keeps the slot it consumed.
+    uploadLimiter.release(session.user.id, decision.attempt);
     return NextResponse.json({ error: "INVALID_REQUEST" }, { status: 400 });
   }
 
@@ -107,7 +108,7 @@ export async function POST(
     // no URL was signed and no object can land. Counting it would let a client
     // spend a sender's whole allowance on requests that were never going to
     // store anything.
-    uploadLimiter.release(session.user.id);
+    uploadLimiter.release(session.user.id, decision.attempt);
     return NextResponse.json({ error: validation.error }, { status: 400 });
   }
 

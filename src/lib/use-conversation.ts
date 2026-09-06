@@ -298,7 +298,13 @@ export function useConversation(
       for (const timer of timers.values()) clearTimeout(timer);
       timers.clear();
     };
-  }, [conversationId]);
+    // Cleared when the socket changes as well as the Conversation. A timer
+    // closes over the socket it was armed against, so one surviving a
+    // reconnection would fire at a disposed socket and silently do nothing --
+    // while the entry it owned had already been skipped by the replay above,
+    // leaving it unsent until the next reconnection. Clearing here hands those
+    // entries back to the replay, which is the path that can actually send them.
+  }, [conversationId, socket]);
 
   /**
    * `emitSend` reaching itself, so a rate-limited send can put itself back on
@@ -585,6 +591,15 @@ export function useConversation(
       if (!store || cancelled) return;
       for (const pending of loadOutbox(store, conversationId)) {
         if (cancelled) return;
+
+        // A send waiting out a rate limit is already spoken for: its timer will
+        // put it back on the wire when the interval has passed. Re-emitting it
+        // here would send it twice -- once now and once when the timer fires --
+        // and both would spend a slot from the very limiter it is backing off
+        // from, making the flood worse rather than better. The idempotency key
+        // collapses the two into one Message, but the traffic is still paid for,
+        // so the entry is left to its timer.
+        if (backoffTimersRef.current.has(pending.clientMessageId)) continue;
         // Rendered as pending again: a Message retried after a reload has no
         // entry in this page's state yet, and the sender should see it waiting
         // rather than see it reappear only once it is accepted.
