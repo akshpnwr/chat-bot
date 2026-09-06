@@ -1,0 +1,45 @@
+# Holds off Render's idle spin-down.
+#
+# The free tier stops a service after 15 minutes without traffic and takes
+# roughly 60 seconds to wake (ADR-0001). A request every 10 minutes means the
+# idle window never elapses, so a reviewer opening the deployment lands on a
+# warm process.
+#
+# Ten minutes rather than fourteen: GitHub's scheduler is best-effort and runs
+# late under load, so a cadence that only just fits inside the window would let
+# an ordinary delay spin the service down. The README documents the cold start
+# anyway, because a missed run is always possible.
+name: keep-warm
+
+on:
+  schedule:
+    # Every 10 minutes.
+    - cron: "*/10 * * * *"
+  # So the ping can be fired by hand right after a deploy, without waiting for
+  # the next scheduled run.
+  workflow_dispatch:
+
+# If a run is somehow still going when the next fires, the newer one is the
+# only one worth having -- the point is a recent request, not every request.
+concurrency:
+  group: keep-warm
+  cancel-in-progress: true
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    # Skipped rather than failed when the deployment does not exist yet. Until
+    # the URL is set as a repository variable this workflow is inert, so it
+    # cannot fill the Actions log with red for a service nobody has provisioned.
+    if: vars.DEPLOYMENT_URL != ''
+    steps:
+      - name: Ping the health endpoint
+        # A cold service can take ~60s to answer, so the timeout has to exceed
+        # that or the ping that does the waking is the one recorded as failing.
+        # --retry covers the wake itself: the first request against a stopped
+        # service can be refused outright rather than held open.
+        run: |
+          curl --fail --show-error --silent \
+               --max-time 90 \
+               --retry 3 --retry-delay 20 --retry-connrefused \
+               "${{ vars.DEPLOYMENT_URL }}/api/health"

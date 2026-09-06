@@ -73,12 +73,57 @@ export function nudityBackendReady(): Promise<void> {
   return backend;
 }
 
+/**
+ * Whether the model has finished loading, answerable without awaiting it.
+ *
+ * A flag rather than inspecting `loading`, because a promise cannot be asked
+ * whether it has settled without awaiting it -- and the health endpoint has to
+ * answer synchronously while the load is still in flight, which is precisely
+ * the state worth reporting.
+ *
+ * Held on `globalThis` for the same reason the Prisma client is (`src/lib/db.ts`),
+ * and it is load-bearing here rather than merely tidy. The custom server warms
+ * the classifier through Node's own resolver (`server/main.ts`), while the
+ * health route reaches this file through Next's bundler graph. Those are two
+ * instances of this module, each with its own module-level state, so a plain
+ * `let` would be set on the instance that did the warming and read on the one
+ * that did not -- reporting `loading` forever on a process whose model is
+ * ready.
+ *
+ * Nothing gates classification on this. It is reported, not enforced: an image
+ * arriving mid-load is classified on demand by awaiting the same promise, so a
+ * false here costs latency rather than allowing a bypass.
+ */
+const globalForClassifier = globalThis as unknown as { nudityClassifierReady?: boolean };
+
+/** Whether the nudity classifier has finished loading. */
+export function nudityClassifierReady(): boolean {
+  return globalForClassifier.nudityClassifierReady === true;
+}
+
+/**
+ * Sets readiness directly, so a test can reach the ready state without paying
+ * for a 74 MB load.
+ *
+ * Exported rather than left to tests to write the global themselves: the key
+ * is a string, and a test that spells it out is coupled to that spelling
+ * through a cast that makes the mistake look type-checked. Renaming the key
+ * would then leave the test passing against a flag nothing reads.
+ */
+export function setNudityClassifierReadyForTest(ready: boolean): void {
+  globalForClassifier.nudityClassifierReady = ready;
+}
+
 function model(): Promise<nsfw.NSFWJS> {
   if (loading === null) {
     loading = nudityBackendReady()
       // No argument: nsfwjs 4.4.0 carries MobileNetV2's weights in the package
       // itself and loads them from memory, so this too involves no network.
-      .then(() => nsfw.load());
+      .then(() => nsfw.load())
+      .then((loaded) => {
+        globalForClassifier.nudityClassifierReady = true;
+        return loaded;
+      });
   }
   return loading;
 }
