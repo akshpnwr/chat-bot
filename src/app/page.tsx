@@ -1,48 +1,20 @@
-"use client";
+import { redirect } from "next/navigation";
 
-import { Button } from "@/components/ui/button";
-import { ConnectionBadge } from "@/components/connection-badge";
-import { useSocket } from "@/lib/use-socket";
-
+/**
+ * The root is an entrance, not a destination.
+ *
+ * `/app` is the only thing this project does, and it already resolves both
+ * cases on its own: it renders the authenticated view for a signed-in visitor
+ * and redirects a signed-out one to `/sign-in`. A landing page in front of
+ * that would be a third surface that has to answer the same question those two
+ * already answer between them, so `/` forwards rather than deciding.
+ *
+ * What stood here was the tracer-bullet harness from ADR-0001 -- a button that
+ * emitted a ping and logged the reply to the console. It proved the socket
+ * shared an origin with the page back when nothing else did; the running
+ * application has proved that continuously ever since, so the harness was
+ * evidence for a claim no longer in doubt.
+ */
 export default function Home() {
-  const { socket, status } = useSocket();
-
-  return (
-    <main className="mx-auto flex min-h-dvh w-full max-w-[1200px] flex-col gap-6 px-4 py-16 sm:px-6">
-      <header className="flex flex-wrap items-center justify-between gap-4">
-        <h1 className="text-[32px] leading-10 tracking-[-1.28px] sm:text-[48px] sm:leading-[48px] sm:tracking-[-2.28px]">
-          Chat
-        </h1>
-        <ConnectionBadge status={status} />
-      </header>
-
-      <p className="max-w-prose text-[16px] text-secondary">
-        A real-time one-to-one messaging system. Messages are delivered over a
-        persistent socket, moderated server-side before they become visible, and
-        survive disconnection without loss or duplication.
-      </p>
-
-      <div className="rounded-card bg-elevated shadow-border-small flex flex-col gap-4 p-6">
-        <h2>Socket</h2>
-        <p className="text-[12px] leading-4 text-muted">
-          The browser holds a socket to the same origin as the page — one Node
-          process serves both.
-        </p>
-        <div>
-          <Button
-            variant="secondary"
-            size="sm"
-            disabled={!socket || status !== "connected"}
-            onClick={() =>
-              socket?.emit("ping", (reply) =>
-                console.log("pong", new Date(reply.at).toISOString()),
-              )
-            }
-          >
-            Send a ping
-          </Button>
-        </div>
-      </div>
-    </main>
-  );
+  redirect("/app");
 }

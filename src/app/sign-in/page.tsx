@@ -3,8 +3,25 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { CopyButton } from "@/components/copy-button";
 import { Input } from "@/components/ui/input";
 import { signIn } from "@/lib/auth-client";
+
+/**
+ * The seeded accounts a reviewer signs in with.
+ *
+ * Written out here rather than imported from `prisma/seed.ts`, which is the
+ * list's actual owner: that module pulls in Prisma and better-auth, so
+ * importing it would drag the server into the browser bundle to read four
+ * strings. The seed holds a third account -- Alan, who owns the 10,000-Message
+ * Conversation -- deliberately left out, because the demo needs two people
+ * talking to each other and a third set of credentials is only noise on the
+ * way in.
+ */
+const DEMO_ACCOUNTS = [
+  { email: "ada@example.com", password: "demo-password-1" },
+  { email: "grace@example.com", password: "demo-password-2" },
+] as const;
 
 export default function SignInPage() {
   const router = useRouter();
@@ -69,10 +86,24 @@ export default function SignInPage() {
     <main className="mx-auto flex min-h-dvh w-full max-w-[400px] flex-col justify-center gap-6 px-4 py-16">
       <div className="flex flex-col gap-2">
         <h1 className="text-[32px] leading-10 tracking-[-1.28px]">Sign in</h1>
-        <p className="text-[12px] leading-4 text-muted">
-          Demo accounts: ada@example.com / demo-password-1 &middot;
-          grace@example.com / demo-password-2
-        </p>
+        <div className="flex flex-col gap-1">
+          <p className="text-[12px] leading-4 text-muted">Demo accounts</p>
+          {DEMO_ACCOUNTS.map((account) => (
+            <div
+              key={account.email}
+              className="flex flex-wrap items-center gap-x-1 gap-y-0 text-[12px] leading-4 text-muted"
+            >
+              <span className="font-mono">{account.email}</span>
+              <CopyButton value={account.email} label={`${account.email} email`} />
+              <span aria-hidden>&middot;</span>
+              <span className="font-mono">{account.password}</span>
+              <CopyButton
+                value={account.password}
+                label={`${account.email} password`}
+              />
+            </div>
+          ))}
+        </div>
       </div>
 
       <form onSubmit={onSubmit} className="flex flex-col gap-4">
