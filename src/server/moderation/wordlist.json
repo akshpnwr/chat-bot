@@ -1,0 +1,23 @@
+{
+  "comment": "Prohibited terms, one per entry, in their plain undisguised spelling. Written the way a person would type them: the pipeline in profanity.ts normalizes both this list and the Message before matching, so no entry needs to anticipate a disguise. Swappable for a managed list or service without touching the pipeline (ADR-0004).",
+  "terms": [
+    "arse",
+    "asshole",
+    "bastard",
+    "bitch",
+    "bollocks",
+    "cunt",
+    "dickhead",
+    "fuck",
+    "motherfucker",
+    "nigger",
+    "prick",
+    "pussy",
+    "retard",
+    "shit",
+    "slut",
+    "twat",
+    "wanker",
+    "whore"
+  ]
+}

@@ -268,20 +268,31 @@ export function useConversation(
           return;
         }
 
-        // NOT_A_PARTICIPANT will not become true by being retried, so the
-        // Message leaves the outbox rather than being retried on every
-        // reconnection for the rest of the session.
-        if (reply.error === "NOT_A_PARTICIPANT" && store) {
+        // Neither refusal becomes acceptance by being retried: membership does
+        // not change by asking again, and the same words screened again are
+        // refused for the same term. So both leave the outbox, rather than
+        // going back on the wire at every reconnection for the rest of the
+        // session. Only a transport or server failure is worth retrying.
+        const permanent =
+          reply.error === "NOT_A_PARTICIPANT" || reply.error === "PROHIBITED_LANGUAGE";
+        if (permanent && store) {
           settleSend(store, entry.conversationId, entry.clientMessageId);
         }
 
         // The Message stays visible and is marked failed rather than vanishing:
-        // a sender must be able to see what was not delivered.
+        // a sender must be able to see what was not delivered. Where the server
+        // named a reason it is carried onto the entry, so the notice sits on the
+        // Message it is about rather than beside the Conversation as a whole.
+        const failureReason =
+          reply.error === "PROHIBITED_LANGUAGE" && reply.term !== undefined
+            ? `Not sent: "${reply.term}" is not allowed`
+            : undefined;
+
         setState((current) => ({
           ...current,
           entries: current.entries.map((held) =>
             held.clientMessageId === entry.clientMessageId
-              ? { ...held, pending: false, failed: true }
+              ? { ...held, pending: false, failed: true, failureReason }
               : held,
           ),
         }));

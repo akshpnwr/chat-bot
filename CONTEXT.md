@@ -30,6 +30,13 @@ The state of a Message once it is durably stored by the server. Acceptance is th
 system promises never to silently lose a Message past.
 _Avoid_: Saved, persisted, committed
 
+**Refused**:
+A Message the server declined to Accept, so it was never stored and can never be delivered. A
+refusal names its cause — the prohibited term that tripped moderation — and reaches only the
+sender; the recipient never learns the Message was attempted. Distinct from a failed send, which
+is a Message the server never ruled on and which is retried.
+_Avoid_: Blocked, filtered, censored
+
 **Read Mark**:
 A Participant's high-water mark — the most recent Message they have read, held as that
 Message's Sequence. Everything at or before it is read; everything after is unread. Reads are

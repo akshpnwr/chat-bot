@@ -295,8 +295,24 @@ export function MessageList({
                 >
                   {entry.body}
                 </div>
-                <span className="px-1 text-[12px] leading-4 text-muted">
-                  {entry.failed
+                <span
+                  className={cn(
+                    "px-1 text-[12px] leading-4",
+                    // A refusal is read as an instruction rather than as
+                    // metadata, so it is coloured like one; an ordinary
+                    // timestamp stays quiet.
+                    entry.failureReason ? "text-status-red" : "text-muted",
+                  )}
+                >
+                  {/*
+                    The reason, where the server gave one -- which term was
+                    refused, so the sender can edit rather than guess. It
+                    replaces "Not delivered" rather than joining it: naming the
+                    term already says the Message did not go.
+                  */}
+                  {entry.failureReason
+                    ? entry.failureReason
+                    : entry.failed
                     ? "Not delivered"
                     : entry.pending
                       ? "Sending…"

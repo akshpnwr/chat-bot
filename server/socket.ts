@@ -6,7 +6,11 @@ import {
   NotAParticipantError,
 } from "../src/server/authorization.js";
 import { MessageStatus } from "@prisma/client";
-import { sendMessage, syncMessages } from "../src/server/messages.js";
+import {
+  ProhibitedLanguageError,
+  sendMessage,
+  syncMessages,
+} from "../src/server/messages.js";
 import {
   advanceReadMark,
   correspondentsOf,
@@ -385,6 +389,15 @@ export function attachSocketServer(httpServer: HttpServer): ChatServer {
         .catch((error: unknown) => {
           if (error instanceof NotAParticipantError) {
             callback({ ok: false, error: "NOT_A_PARTICIPANT" });
+            return;
+          }
+          // Moderation refused it. The term goes back to the sender -- it is
+          // the word they just typed, so it discloses nothing they did not
+          // already know, and without it they can only guess at a rewrite.
+          // Nothing was written and nothing is broadcast, so the recipient
+          // never learns the Message was attempted.
+          if (error instanceof ProhibitedLanguageError) {
+            callback({ ok: false, error: "PROHIBITED_LANGUAGE", term: error.term });
             return;
           }
           console.error("[socket] message:send failed", error);

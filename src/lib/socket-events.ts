@@ -82,7 +82,7 @@ export interface ServerToClientEvents {
  * failures a client has to handle are visible in the type instead of being
  * discovered from the server's source.
  */
-export type SendError = "NOT_A_PARTICIPANT" | "INTERNAL";
+export type SendError = "NOT_A_PARTICIPANT" | "PROHIBITED_LANGUAGE" | "INTERNAL";
 
 /** The reply to a sync: the Messages missed, or why the gap could not be read. */
 export type SyncReply =
@@ -98,10 +98,18 @@ export type SyncReply =
     }
   | { ok: false; error: SendError };
 
-/** The ack for a send: the Accepted Message, or why it was refused. */
+/**
+ * The ack for a send: the Accepted Message, or why it was refused.
+ *
+ * A refusal for prohibited language carries the term that tripped it, so the
+ * sender can be told what to change rather than only that something was wrong.
+ * It is optional on the type rather than a separate variant because every
+ * other refusal has nothing to say -- and a sender's client renders one
+ * failure path either way.
+ */
 export type SendReply =
   | { ok: true; message: WireMessage }
-  | { ok: false; error: SendError };
+  | { ok: false; error: SendError; term?: string };
 
 /**
  * The reply to a join: the Conversation's live state as it stands right now.

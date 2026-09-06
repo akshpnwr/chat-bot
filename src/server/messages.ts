@@ -1,9 +1,30 @@
 import { MessageStatus, Prisma, type Message } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { assertParticipant } from "@/server/authorization";
+import { screen } from "@/server/moderation/profanity";
 
 /** Postgres' unique-violation code, raised by the idempotency constraint. */
 const UNIQUE_VIOLATION = "P2002";
+
+/**
+ * Raised when a Message is refused for prohibited language.
+ *
+ * It carries the term that tripped the check, because the ticket asks that the
+ * sender be told which word refused it rather than given a bare refusal --
+ * a sender who cannot tell what was wrong can only guess at a rewrite.
+ *
+ * Naming the term is a deliberate disclosure to the *sender* only. It is the
+ * word they themselves just typed, so it tells them nothing they did not
+ * already write; the recipient never learns the Message existed.
+ */
+export class ProhibitedLanguageError extends Error {
+  readonly code = "PROHIBITED_LANGUAGE";
+
+  constructor(readonly term: string) {
+    super(`Message contains a prohibited term: ${term}`);
+    this.name = "ProhibitedLanguageError";
+  }
+}
 
 /**
  * Sends a Message into a Conversation and returns it once Accepted.
@@ -18,6 +39,26 @@ const UNIQUE_VIOLATION = "P2002";
  *
  * The membership guard runs first, so a user who is not a Participant is
  * refused before anything is written.
+ *
+ * Moderation runs second, before the insert, and that placement is the whole
+ * of the enforcement story. This module is the only way a Message is created,
+ * so screening here holds however the send arrived -- over the socket, or from
+ * somebody calling the API directly with their own client. A check anywhere
+ * further out would be a check somebody could go around.
+ *
+ * A Refused Message is not stored at all, rather than stored and hidden. The masking
+ * alternative was rejected by the ticket outright: the sender is told which
+ * term tripped the check and gets their words back to edit, rather than having
+ * them silently altered.
+ *
+ * This goes further than ADR-0003, which gates moderation in the read model by
+ * writing a REJECTED row that recipient-facing queries filter out. No text
+ * Message ever reaches that state: screening is synchronous, so there is no
+ * window in which a row is needed to hold a decision that has already been
+ * made, and a Message that was never written cannot be leaked by a query
+ * somebody adds later. ADR-0003's read-model filter still stands and is still
+ * load-bearing -- it is what will hold images back while they are classified,
+ * which is the asynchronous case it was written for.
  */
 export async function sendMessage({
   senderId,
@@ -31,6 +72,11 @@ export async function sendMessage({
   body: string;
 }): Promise<Message> {
   await assertParticipant(senderId, conversationId);
+
+  const screening = screen(body);
+  if (screening.refused) {
+    throw new ProhibitedLanguageError(screening.term);
+  }
 
   try {
     return await prisma.message.create({

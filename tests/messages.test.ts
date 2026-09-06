@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { createUser, resetDatabase } from "./setup/database";
 import { NotAParticipantError } from "@/server/authorization";
 import { openConversation } from "@/server/conversations";
-import { readMessages, sendMessage } from "@/server/messages";
+import { ProhibitedLanguageError, readMessages, sendMessage } from "@/server/messages";
 import { prisma } from "@/lib/db";
 
 let ada: Awaited<ReturnType<typeof createUser>>;
@@ -219,5 +219,79 @@ describe("readMessages and moderation status", () => {
     const page = await readMessages({ userId: ada.id, conversationId, limit: 50 });
 
     expect(page.messages.map((m) => m.body)).toEqual(["body-rejected-2"]);
+  });
+});
+
+describe("sendMessage moderation", () => {
+  /**
+   * The check lives in this module rather than in the socket handler or the
+   * client, so these tests call the service directly -- which is precisely the
+   * route somebody bypassing the UI would take. If enforcement were anywhere
+   * further out, every assertion below would pass while the guarantee failed.
+   */
+  it("refuses a Message containing a prohibited word, naming the term", async () => {
+    await expect(
+      sendMessage({
+        senderId: ada.id,
+        conversationId,
+        clientMessageId: "33333333-3333-4333-8333-333333333333",
+        body: "you are a shit",
+      }),
+    ).rejects.toThrow(ProhibitedLanguageError);
+  });
+
+  it("stores nothing at all when a Message is refused", async () => {
+    await expect(
+      sendMessage({
+        senderId: ada.id,
+        conversationId,
+        clientMessageId: "44444444-4444-4444-8444-444444444444",
+        body: "f.u.c.k this",
+      }),
+    ).rejects.toThrow(ProhibitedLanguageError);
+
+    // Not stored-and-hidden but never written: a Message that has no row
+    // cannot be leaked by a query anybody adds later.
+    const stored = await prisma.message.count({ where: { conversationId } });
+    expect(stored).toBe(0);
+  });
+
+  it("refuses a disguised Message just as it refuses the plain one", async () => {
+    await expect(
+      sendMessage({
+        senderId: ada.id,
+        conversationId,
+        clientMessageId: "55555555-5555-4555-8555-555555555555",
+        body: "S H 1 T",
+      }),
+    ).rejects.toMatchObject({ code: "PROHIBITED_LANGUAGE", term: "shit" });
+  });
+
+  it("accepts a Message whose innocuous word merely contains a banned substring", async () => {
+    const message = await sendMessage({
+      senderId: ada.id,
+      conversationId,
+      clientMessageId: "66666666-6666-4666-8666-666666666666",
+      body: "I grew up near Scunthorpe",
+    });
+
+    expect(message.body).toBe("I grew up near Scunthorpe");
+  });
+
+  it("refuses a retry of a blocked Message rather than accepting it the second time", async () => {
+    const clientMessageId = "77777777-7777-4777-8777-777777777777";
+    const blocked = {
+      senderId: ada.id,
+      conversationId,
+      clientMessageId,
+      body: "shit",
+    };
+
+    // Screening runs before the insert and is a pure function of the body, so
+    // the refusal is the same every time. A retry that slipped through would
+    // make the outbox a way around moderation.
+    await expect(sendMessage(blocked)).rejects.toThrow(ProhibitedLanguageError);
+    await expect(sendMessage(blocked)).rejects.toThrow(ProhibitedLanguageError);
+    expect(await prisma.message.count({ where: { conversationId } })).toBe(0);
   });
 });

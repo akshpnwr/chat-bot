@@ -29,6 +29,16 @@ export interface ConversationEntry {
   pending: boolean;
   /** Set when the send failed, so the reader is told rather than left waiting. */
   failed?: boolean;
+  /**
+   * Why the send failed, when there is something useful to say -- the term
+   * moderation refused it for.
+   *
+   * Held on the entry rather than in a banner beside the Conversation, because
+   * a sender may have written several Messages and only one of them was
+   * refused. A notice detached from the Message it refers to leaves them
+   * guessing which.
+   */
+  failureReason?: string;
 }
 
 export interface ConversationState {
@@ -259,7 +269,10 @@ export function applyRetrying(
     // Accepted, so there is nothing to retry and nothing to re-mark.
     if (entry.seq !== null) return entry;
     changed = true;
-    return { ...entry, pending: true, failed: false };
+    // The old reason goes with the old failure. A retry that fails again is
+    // answered afresh; leaving the previous one showing would attribute the
+    // new attempt's outcome to the last attempt's cause.
+    return { ...entry, pending: true, failed: false, failureReason: undefined };
   });
 
   return changed ? { ...state, entries } : state;
