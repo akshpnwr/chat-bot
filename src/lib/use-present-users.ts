@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import type { PresencePayload } from "./socket-events";
 import type { ChatSocket } from "./use-socket";
 
 /**
@@ -24,12 +25,15 @@ export function usePresentUsers(
   const [online, setOnline] = useState<ReadonlySet<string>>(() => new Set());
 
   // Joined into a stable key so the effect below does not re-subscribe on every
-  // render merely because the caller built a new array of the same ids.
+  // render merely because the caller built a new array of the same ids. The
+  // key is compared, never parsed back apart -- round-tripping ids through a
+  // delimiter would put a constraint on what an id may contain, and nothing
+  // says an id may not contain a comma.
   const key = userIds.join(",");
+  const watched = useMemo(() => [...userIds], [key]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!socket) return;
-    const watched = key.length === 0 ? [] : key.split(",");
 
     let cancelled = false;
 
@@ -45,7 +49,7 @@ export function usePresentUsers(
     // the server has since forgotten, so it is asked for again.
     socket.on("connect", seed);
 
-    const onPresence = (payload: { userId: string; online: boolean }) => {
+    const onPresence = (payload: PresencePayload) => {
       if (!watched.includes(payload.userId)) return;
       setOnline((current) => {
         // A transition for somebody already in the state it announces changes
@@ -65,7 +69,7 @@ export function usePresentUsers(
       socket.off("connect", seed);
       socket.off("presence:changed", onPresence);
     };
-  }, [socket, key]);
+  }, [socket, watched]);
 
   return online;
 }

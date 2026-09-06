@@ -19,6 +19,15 @@
  * User online for the rest of the process's life with nothing able to correct
  * it. A set of ids cannot drift that way: registering the same id twice is the
  * same one connection.
+ *
+ * Note what a transition is answered from: whether the *User* held any
+ * connection, never whether the *id* was novel. The two come apart under
+ * Socket.IO's `connectionStateRecovery` (server/socket.ts), which reuses a
+ * socket id across a recovered reconnection. The disconnect removes the id and
+ * takes a single-tab User offline; the recovery then re-registers that same
+ * id. Reporting "no transition" because the id looked familiar would leave
+ * that User shown offline while they are connected, until something unrelated
+ * moved their Presence again.
  */
 export interface PresenceRegistry {
   /**

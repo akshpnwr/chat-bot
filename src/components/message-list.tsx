@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { isRead, type ConversationEntry } from "@/lib/conversation-state";
+import type { Sequence } from "@/lib/sequence";
 import { cn } from "@/lib/utils";
 
 /**
@@ -69,7 +70,7 @@ export function MessageList({
    * mark rather than a per-Message flag (CONTEXT.md: Read Mark) -- so a
    * ten-thousand-Message thread costs one value rather than ten thousand.
    */
-  otherLastReadSeq: string;
+  otherLastReadSeq: Sequence;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
 

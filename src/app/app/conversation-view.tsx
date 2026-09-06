@@ -12,7 +12,7 @@ import { TypingIndicator } from "@/components/typing-indicator";
 import { signOut } from "@/lib/auth-client";
 import { useSocket } from "@/lib/use-socket";
 import { useConversation } from "@/lib/use-conversation";
-import { useLiveConversation } from "@/lib/use-presence";
+import { useLiveConversation } from "@/lib/use-live-conversation";
 import { usePresentUsers } from "@/lib/use-present-users";
 import type { WireConversation } from "@/lib/wire";
 import { cn } from "@/lib/utils";
@@ -59,10 +59,17 @@ export function ConversationView({
   // The open Conversation's live state -- the other side's typing and Read
   // Mark. Presence for them comes from the set above rather than being tracked
   // twice, so the header and their row in the list cannot disagree.
+  //
+  // The reader's own Read Mark moving is what clears their unread badge. The
+  // count is derived on the server (CONTEXT.md: Unread Count -- derived, never
+  // stored), so the client cannot subtract it locally; it re-runs the
+  // derivation instead. Opening a Conversation is the moment the badge is most
+  // conspicuously wrong, so it cannot wait for the next Message to arrive.
   const live = useLiveConversation(
     socket,
     selectedId,
     selected?.otherParticipant.id ?? null,
+    () => router.refresh(),
   );
   const otherOnline = selected
     ? onlineUserIds.has(selected.otherParticipant.id)

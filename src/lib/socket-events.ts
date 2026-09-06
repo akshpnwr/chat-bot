@@ -11,7 +11,33 @@ import type { WireMessage } from "./wire";
  * Every Sequence in these payloads is a decimal string (ADR-0006) -- the
  * server holds it as a bigint and converts once, at the boundary in
  * src/lib/wire.ts.
+ *
+ * The broadcast payloads below are named types rather than inline shapes, so a
+ * listener annotates its handler by importing the contract instead of
+ * restating it. A restated shape is one that can drift from the wire it
+ * describes -- and drift in the weakening direction (`Sequence` retyped as a
+ * bare `string`) is exactly what ADR-0006 exists to prevent.
  */
+
+/** @see ServerToClientEvents["conversation:read"] */
+export interface ReadPayload {
+  conversationId: string;
+  userId: string;
+  lastReadSeq: Sequence;
+}
+
+/** @see ServerToClientEvents["conversation:typing"] */
+export interface TypingPayload {
+  conversationId: string;
+  /** Typists other than the recipient; a client is never told it is typing. */
+  userIds: string[];
+}
+
+/** @see ServerToClientEvents["presence:changed"] */
+export interface PresencePayload {
+  userId: string;
+  online: boolean;
+}
 
 export interface ServerToClientEvents {
   "connection:ready": (payload: { userId: string }) => void;
@@ -32,11 +58,7 @@ export interface ServerToClientEvents {
    * mark. That is the one user id in these payloads the server puts there
    * itself -- never one a client claimed.
    */
-  "conversation:read": (payload: {
-    conversationId: string;
-    userId: string;
-    lastReadSeq: Sequence;
-  }) => void;
+  "conversation:read": (payload: ReadPayload) => void;
   /**
    * Who is typing in a Conversation right now -- the whole set, not a delta.
    *
@@ -46,17 +68,13 @@ export interface ServerToClientEvents {
    * being the complete answer means the next one repairs whatever the last one
    * missed.
    */
-  "conversation:typing": (payload: {
-    conversationId: string;
-    /** Typists other than the recipient; a client is never told it is typing. */
-    userIds: string[];
-  }) => void;
+  "conversation:typing": (payload: TypingPayload) => void;
   /**
    * A User's Presence changed. Sent only on a real transition -- their first
    * connection or their last -- so opening a second tab does not make the
    * other side's indicator flicker.
    */
-  "presence:changed": (payload: { userId: string; online: boolean }) => void;
+  "presence:changed": (payload: PresencePayload) => void;
 }
 
 /**

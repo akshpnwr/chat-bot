@@ -72,6 +72,20 @@ describe("presence", () => {
     expect(presence.isOnline("ada")).toBe(false);
   });
 
+  it("brings a User back online when recovery reuses their socket id", () => {
+    // Socket.IO's `connectionStateRecovery` reuses a socket id across a
+    // recovered reconnection, so the same id arrives again after the
+    // disconnect that removed it. A transition answered from whether the *id*
+    // looked familiar would report "already online" and skip the broadcast,
+    // leaving a single-tab User shown offline while they are connected.
+    const presence = createPresenceRegistry();
+    presence.connected("ada", "socket-1");
+
+    expect(presence.disconnected("ada", "socket-1")).toBe(true);
+    expect(presence.connected("ada", "socket-1")).toBe(true);
+    expect(presence.isOnline("ada")).toBe(true);
+  });
+
   it("ignores a disconnection it never saw connect", () => {
     const presence = createPresenceRegistry();
     presence.connected("ada", "socket-1");

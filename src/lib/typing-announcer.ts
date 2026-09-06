@@ -1,4 +1,3 @@
-import { TYPING_TTL_MS } from "./typing";
 
 /**
  * Decides when to tell the server somebody is typing.
@@ -101,5 +100,3 @@ export function createTypingAnnouncer({
   };
 }
 
-/** Re-exported so a caller setting up the two together sees they are related. */
-export { TYPING_TTL_MS };
