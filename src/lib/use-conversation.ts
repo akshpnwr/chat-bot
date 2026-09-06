@@ -6,6 +6,7 @@ import {
   applyAccepted,
   applyOlderPage,
   applyPending,
+  applyPendingAsset,
   applyPendingImage,
   applyRetrying,
   applySyncGap,
@@ -32,6 +33,7 @@ import {
   refuseUnsendableImage,
   uploadToQuarantine,
 } from "./image-upload";
+import { findSticker, stickerUrl } from "./sticker-packs";
 import { isAfter, maxSequence, type Sequence } from "./sequence";
 import type { SendReply, SyncReply } from "./socket-events";
 import type { WireMessage, WireMessagePage } from "./wire";
@@ -83,6 +85,23 @@ export interface OpenConversation {
    * arrives later over `message:moderated`.
    */
   sendImage: (file: File) => Promise<void>;
+  /**
+   * Sends a GIF by the provider's id. The URL is never named from here -- the
+   * server re-resolves the id, which is what stops this path becoming a way to
+   * deliver an image that skipped classification.
+   *
+   * The dimensions come from the search result so the bubble can reserve its
+   * space before the GIF loads.
+   */
+  sendGif: (gif: {
+    id: string;
+    description: string;
+    fullUrl: string;
+    width: number;
+    height: number;
+  }) => void;
+  /** Sends a sticker from a bundled pack, named by pack and sticker id. */
+  sendSticker: (packId: string, stickerId: string) => void;
   loadOlder: () => void;
   /**
    * Announces that the reader is composing, or has stopped. Throttled inside
@@ -288,7 +307,13 @@ export function useConversation(
           reply.error === "PROHIBITED_LANGUAGE" ||
           // A key the server refuses is refused for what it is, not for when
           // it was sent, so asking again changes nothing.
-          reply.error === "INVALID_ASSET";
+          reply.error === "INVALID_ASSET" ||
+          // A sticker no pack contains is not one a later attempt will find,
+          // and a GIF the provider will not resolve is refused for what it is.
+          // Retrying either would put the same refusal back on the wire at
+          // every reconnection for the rest of the session.
+          reply.error === "UNKNOWN_STICKER" ||
+          reply.error === "GIF_UNAVAILABLE";
         if (permanent && store) {
           settleSend(store, entry.conversationId, entry.clientMessageId);
         }
@@ -302,7 +327,11 @@ export function useConversation(
             ? `Not sent: "${reply.term}" is not allowed`
             : reply.error === "INVALID_ASSET"
               ? "Not sent: this image could not be attached"
-              : undefined;
+              : reply.error === "GIF_UNAVAILABLE"
+                ? "Not sent: that GIF is no longer available"
+                : reply.error === "UNKNOWN_STICKER"
+                  ? "Not sent: that sticker could not be found"
+                  : undefined;
 
         setState((current) => ({
           ...current,
@@ -313,6 +342,32 @@ export function useConversation(
           ),
         }));
     };
+
+    if (entry.asset) {
+      if (entry.asset.kind === "GIF") {
+        activeSocket.emit(
+          "message:sendGif",
+          {
+            conversationId: entry.conversationId,
+            clientMessageId: entry.clientMessageId,
+            gifId: entry.asset.gifId,
+          },
+          onReply,
+        );
+        return;
+      }
+      activeSocket.emit(
+        "message:sendSticker",
+        {
+          conversationId: entry.conversationId,
+          clientMessageId: entry.clientMessageId,
+          packId: entry.asset.packId,
+          stickerId: entry.asset.stickerId,
+        },
+        onReply,
+      );
+      return;
+    }
 
     if (entry.image) {
       activeSocket.emit(
@@ -477,7 +532,21 @@ export function useConversation(
           // outbox kept and shows nothing inside, which is honest: the sender
           // is being told this image is still on its way, not shown a picture
           // that is not there.
-          const rendered = pending.image
+          // A GIF or sticker retried after a reload can still show its
+          // picture, unlike an image: the URL is a public one that outlived
+          // the page rather than an object URL that died with it.
+          const rendered = pending.asset
+            ? applyPendingAsset(current, {
+                clientMessageId: pending.clientMessageId,
+                senderId: viewerId,
+                kind: pending.asset.kind,
+                assetUrl: pending.asset.assetUrl,
+                body: pending.body,
+                assetWidth: pending.asset.assetWidth,
+                assetHeight: pending.asset.assetHeight,
+                createdAt: pending.createdAt,
+              })
+            : pending.image
             ? applyPendingImage(current, {
                 clientMessageId: pending.clientMessageId,
                 senderId: viewerId,
@@ -749,6 +818,106 @@ export function useConversation(
     [socket, conversationId, viewerId, emitSend],
   );
 
+  /**
+   * Records a GIF or sticker send and puts it on the wire.
+   *
+   * One function for both because they differ only in the identifiers they
+   * carry. Everything else -- the durable record before the optimistic render,
+   * the immediate pending bubble, the deferral to the reconnection when there
+   * is no socket -- is the text path exactly, and for the text path's reasons.
+   *
+   * Unlike an image there is no upload to wait on, so this is synchronous and
+   * a send made while offline is queued rather than refused: the outbox entry
+   * is a handful of identifiers, not megabytes of file.
+   */
+  const sendAsset = useCallback(
+    (
+      asset: NonNullable<OutboxEntry["asset"]>,
+      /** The description or label, kept as the bubble's alt text. */
+      body: string,
+    ) => {
+      if (!conversationId) return;
+
+      const clientMessageId = crypto.randomUUID();
+      const entry: OutboxEntry = {
+        clientMessageId,
+        conversationId,
+        body,
+        createdAt: new Date().toISOString(),
+        asset,
+      };
+
+      const store = outboxRef.current;
+      if (store) recordSend(store, entry);
+
+      setState((current) =>
+        applyPendingAsset(current, {
+          clientMessageId,
+          senderId: viewerId,
+          kind: asset.kind,
+          assetUrl: asset.assetUrl,
+          body,
+          assetWidth: asset.assetWidth,
+          assetHeight: asset.assetHeight,
+          createdAt: entry.createdAt,
+        }),
+      );
+
+      if (socket?.connected) emitSend(socket, entry);
+      announcerRef.current?.stop();
+    },
+    [socket, conversationId, viewerId, emitSend],
+  );
+
+  const sendGif = useCallback(
+    (gif: {
+      id: string;
+      description: string;
+      fullUrl: string;
+      width: number;
+      height: number;
+    }) => {
+      // The full-size URL rather than the preview: it is what the accepted
+      // Message will carry, so the bubble does not swap pictures when the ack
+      // settles it. The server ignores this entirely and re-resolves the id.
+      sendAsset(
+        {
+          kind: "GIF",
+          gifId: gif.id,
+          assetUrl: gif.fullUrl,
+          assetWidth: gif.width,
+          assetHeight: gif.height,
+        },
+        gif.description,
+      );
+    },
+    [sendAsset],
+  );
+
+  const sendSticker = useCallback(
+    (packId: string, stickerId: string) => {
+      // Looked up rather than assembled, for the same reason the server does
+      // it: the URL is built from what the registry holds, so an id naming
+      // something outside the bundled packs has nothing to render and is not
+      // sent at all.
+      const sticker = findSticker(packId, stickerId);
+      if (!sticker) return;
+
+      sendAsset(
+        {
+          kind: "STICKER",
+          packId,
+          stickerId,
+          assetUrl: stickerUrl(packId, sticker),
+          assetWidth: sticker.width,
+          assetHeight: sticker.height,
+        },
+        sticker.label,
+      );
+    },
+    [sendAsset],
+  );
+
   const loadOlder = useCallback(() => {
     const cursor = cursorRef.current;
     if (!conversationId || cursor === null || reachedStartRef.current) return;
@@ -831,6 +1000,8 @@ export function useConversation(
     error,
     send,
     sendImage,
+    sendGif,
+    sendSticker,
     loadOlder,
     setTyping,
   };

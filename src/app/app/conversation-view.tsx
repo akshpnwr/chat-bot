@@ -243,6 +243,13 @@ export function ConversationView({
                   // refusal is reported on the bubble it belongs to, so the
                   // composer never waits on it.
                   onSendImage={(file) => void conversation.sendImage(file)}
+                  // A GIF is handed over as the search result the sender
+                  // clicked, but only its id is what actually gets sent -- the
+                  // rest draws the pending bubble. The server re-resolves the
+                  // id, so what a Message ends up pointing at is never a URL
+                  // this browser named.
+                  onSendGif={conversation.sendGif}
+                  onSendSticker={conversation.sendSticker}
                   offline={status !== "connected"}
                   onTyping={conversation.setTyping}
                 />

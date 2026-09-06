@@ -8,10 +8,14 @@ import {
 import { MessageStatus } from "@prisma/client";
 import {
   ProhibitedLanguageError,
+  sendGifMessage,
   sendImageMessage,
   sendMessage,
+  sendStickerMessage,
   syncMessages,
+  UnknownStickerError,
 } from "../src/server/messages.js";
+import { gifProvider } from "../src/server/gifs/provider.js";
 import { moderateImageMessage } from "../src/server/moderation/pipeline.js";
 import { decodeToTensor } from "../src/server/moderation/decode.js";
 import { classifyImage } from "../src/server/moderation/nudity.js";
@@ -524,6 +528,90 @@ export function attachSocketServer(httpServer: HttpServer): ChatServer {
             return;
           }
           console.error("[socket] message:sendImage failed", error);
+          callback({ ok: false, error: "INTERNAL" });
+        });
+    });
+
+    /**
+     * Accepts a GIF the sender named by the provider's id.
+     *
+     * The id is resolved here rather than trusted, and that round trip is the
+     * point of the whole event. What is stored on the Message is the URL the
+     * provider answered with, so a GIF can only ever be one the provider
+     * indexed -- a client naming a URL directly would be attaching an image
+     * that skipped classification entirely, which is the same bypass
+     * `isAttachableKey` closes for uploads.
+     *
+     * Membership is checked before the provider is asked. Resolving first
+     * would spend a third-party request on behalf of somebody who is not in
+     * the Conversation, which is a small thing to hand a stranger.
+     *
+     * Unlike an image this is one round trip: the Message is VISIBLE when it
+     * is Accepted, so it is broadcast before the ack goes back.
+     */
+    socket.on("message:sendGif", (payload, callback) => {
+      assertParticipant(userId, payload.conversationId)
+        .then(async () => {
+          const gif = await gifProvider().resolve(payload.gifId);
+          // Null covers both "no such id" and "the provider could not be
+          // asked". They are one refusal here because the sender's only move
+          // is the same either way: pick a different GIF.
+          if (gif === null) {
+            callback({ ok: false, error: "GIF_UNAVAILABLE" });
+            return;
+          }
+
+          const message = await sendGifMessage({
+            senderId: userId,
+            conversationId: payload.conversationId,
+            clientMessageId: payload.clientMessageId,
+            gif,
+          });
+          const wire = toWireMessage(message);
+          callback({ ok: true, message: wire });
+          io.to(conversationRoom(message.conversationId)).emit("message:new", wire);
+        })
+        .catch((error: unknown) => {
+          if (error instanceof NotAParticipantError) {
+            callback({ ok: false, error: "NOT_A_PARTICIPANT" });
+            return;
+          }
+          console.error("[socket] message:sendGif failed", error);
+          callback({ ok: false, error: "INTERNAL" });
+        });
+    });
+
+    /**
+     * Accepts a sticker from a bundled pack.
+     *
+     * No third party is involved and nothing is uploaded: the artwork ships
+     * with the application, so the only question is whether the named sticker
+     * is one of them. `sendStickerMessage` answers that against the registry
+     * and builds the URL from what it finds, so the ids never become a path.
+     */
+    socket.on("message:sendSticker", (payload, callback) => {
+      sendStickerMessage({
+        senderId: userId,
+        conversationId: payload.conversationId,
+        clientMessageId: payload.clientMessageId,
+        packId: payload.packId,
+        stickerId: payload.stickerId,
+      })
+        .then((message) => {
+          const wire = toWireMessage(message);
+          callback({ ok: true, message: wire });
+          io.to(conversationRoom(message.conversationId)).emit("message:new", wire);
+        })
+        .catch((error: unknown) => {
+          if (error instanceof NotAParticipantError) {
+            callback({ ok: false, error: "NOT_A_PARTICIPANT" });
+            return;
+          }
+          if (error instanceof UnknownStickerError) {
+            callback({ ok: false, error: "UNKNOWN_STICKER" });
+            return;
+          }
+          console.error("[socket] message:sendSticker failed", error);
           callback({ ok: false, error: "INTERNAL" });
         });
     });

@@ -57,6 +57,51 @@ const MAX_IMAGE_WIDTH_PX = 320;
  * a wrong reservation, but a wrong reservation still holds still, whereas no
  * reservation reflows.
  */
+/**
+ * A GIF or a sticker.
+ *
+ * Rendered straight from `assetUrl` rather than through
+ * `/api/messages/{id}/asset`, which is the difference between this and an
+ * image and not an oversight. That route exists so the read model can decide
+ * who may see a picture each time it is asked for (ADR-0003) -- but neither of
+ * these has anything to withhold: a sticker ships in this application's own
+ * `public/` and a GIF is a public URL at the provider, already fetchable by
+ * anyone who has it. Proxying them would spend a request handler protecting
+ * nothing.
+ *
+ * It follows that the URL is usable the moment the sender picks it, so unlike
+ * an image there is no pending state with no picture in it -- the sender and
+ * the recipient look at the same thing from the first frame.
+ */
+function AssetBubble({ entry }: { entry: ConversationEntry }) {
+  const width = entry.assetWidth ?? 1;
+  const height = entry.assetHeight ?? 1;
+  // A sticker is drawn at its own size and a GIF is capped like a photo, so a
+  // sticker reads as a small gesture rather than as a picture that happens to
+  // be square.
+  const cap = entry.kind === "STICKER" ? width : MAX_IMAGE_WIDTH_PX;
+  const displayWidth = Math.min(width, cap);
+  const displayHeight = Math.round((displayWidth * height) / width);
+
+  if (!entry.assetUrl) return null;
+
+  return (
+    <img
+      src={entry.assetUrl}
+      // The GIF's description or the sticker's label. Real alt text rather
+      // than the empty string an image bubble uses: nobody has read a GIF's
+      // contents, but the provider named it, and a sticker's label is exact.
+      alt={entry.body ?? ""}
+      width={displayWidth}
+      height={displayHeight}
+      className="block rounded-[12px]"
+      style={{ maxWidth: "100%", height: "auto" }}
+      loading="lazy"
+      decoding="async"
+    />
+  );
+}
+
 function ImageBubble({ entry }: { entry: ConversationEntry }) {
   const width = entry.assetWidth ?? 1;
   const height = entry.assetHeight ?? 1;
@@ -356,10 +401,21 @@ export function MessageList({
                     // An image fills its bubble; only text needs the inset. A
                     // padded image bubble would draw a frame of the sender's
                     // colour around every picture.
-                    entry.kind === "IMAGE" ? "overflow-hidden p-0" : "px-3 py-2",
-                    mine
-                      ? "bg-foreground text-elevated"
-                      : "bg-elevated text-foreground shadow-border",
+                    // An asset fills its bubble; only text needs the inset. A
+                    // padded picture would draw a frame of the sender's colour
+                    // around every one. A sticker goes further and drops the
+                    // bubble entirely -- artwork with its own transparent
+                    // edges sitting on a coloured slab looks like a mistake.
+                    entry.kind === "STICKER"
+                      ? "bg-transparent p-0 shadow-none"
+                      : entry.kind === "IMAGE" || entry.kind === "GIF"
+                        ? "overflow-hidden p-0"
+                        : "px-3 py-2",
+                    entry.kind === "STICKER"
+                      ? null
+                      : mine
+                        ? "bg-foreground text-elevated"
+                        : "bg-elevated text-foreground shadow-border",
                     // Pending is signalled by weight, not by a spinner: the
                     // Message is readable throughout, and settling is a
                     // one-property change rather than a layout shift.
@@ -369,6 +425,8 @@ export function MessageList({
                 >
                   {entry.kind === "IMAGE" ? (
                     <ImageBubble entry={entry} />
+                  ) : entry.kind === "GIF" || entry.kind === "STICKER" ? (
+                    <AssetBubble entry={entry} />
                   ) : (
                     entry.body
                   )}

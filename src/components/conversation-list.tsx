@@ -105,16 +105,23 @@ export function ConversationList({
                   )}
                 >
                   {/*
-                    An image has no body to preview, so it is named rather than
-                    left blank -- a Conversation whose last Message was a photo
-                    would otherwise read "No messages yet", which is false.
+                    A picture is named rather than previewed. An image has no
+                    body at all, so a Conversation whose last Message was a
+                    photo would otherwise read "No messages yet", which is
+                    false. A GIF and a sticker do carry a body -- the
+                    provider's description and the pack's label -- but those
+                    are alt text rather than something the sender wrote, and a
+                    row reading "a dancing cat" would look like they said it.
                   */}
                   {conversation.latestMessage === null
                     ? "No messages yet"
-                    : (conversation.latestMessage.body ??
-                      (conversation.latestMessage.kind === "IMAGE"
-                        ? "Photo"
-                        : "No messages yet"))}
+                    : conversation.latestMessage.kind === "IMAGE"
+                      ? "Photo"
+                      : conversation.latestMessage.kind === "GIF"
+                        ? "GIF"
+                        : conversation.latestMessage.kind === "STICKER"
+                          ? "Sticker"
+                          : (conversation.latestMessage.body ?? "No messages yet")}
                 </span>
               </span>
               {/*
