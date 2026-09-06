@@ -27,9 +27,11 @@ import {
 } from "../src/server/read-marks.js";
 import { createPresenceRegistry } from "../src/lib/presence.js";
 import { createTypingRegistry } from "../src/lib/typing.js";
+import { createRateLimiter, RATE_LIMITS } from "../src/lib/rate-limit.js";
 import { toWireMessage } from "../src/lib/wire.js";
 import type {
   ClientToServerEvents,
+  SendReply,
   ServerToClientEvents,
   SocketData,
 } from "../src/lib/socket-events.js";
@@ -105,6 +107,41 @@ export function attachSocketServer(httpServer: HttpServer): ChatServer {
    */
   const presence = createPresenceRegistry();
   const typing = createTypingRegistry();
+
+  /**
+   * What one account may send, across every kind of Message and every tab.
+   *
+   * One limiter for all four send events rather than one each, because the
+   * resource being protected is shared: a flood of stickers costs the process
+   * and the database what a flood of text does, and four separate allowances
+   * would let a script spend all of them at once for four times the traffic.
+   *
+   * Keyed on the handshake's user id, which is the id no payload can claim
+   * (see the middleware above) -- so the limit cannot be shed by reconnecting,
+   * opening another tab, or shaping an event.
+   */
+  const sendLimiter = createRateLimiter(RATE_LIMITS.send);
+
+  /**
+   * Refuses a send that is over the limit, having recorded it if it is not.
+   *
+   * Returns true when the caller should stop, so each handler spends one line
+   * on the check rather than repeating the refusal four times -- and so a
+   * fifth send event added later has an obvious thing to call.
+   */
+  function refuseIfFlooding(
+    senderId: string,
+    callback: (reply: SendReply) => void,
+  ): boolean {
+    const decision = sendLimiter.consume(senderId);
+    if (decision.allowed) return false;
+    callback({
+      ok: false,
+      error: "RATE_LIMITED",
+      retryAfterMs: decision.retryAfterMs,
+    });
+    return true;
+  }
 
   /**
    * Tells a User's correspondents that their Presence changed.
@@ -418,6 +455,8 @@ export function attachSocketServer(httpServer: HttpServer): ChatServer {
      * Message is attributed to whoever the handshake established.
      */
     socket.on("message:send", (payload, callback) => {
+      if (refuseIfFlooding(userId, callback)) return;
+
       sendMessage({
         senderId: userId,
         conversationId: payload.conversationId,
@@ -480,6 +519,8 @@ export function attachSocketServer(httpServer: HttpServer): ChatServer {
      * directly.
      */
     socket.on("message:sendImage", (payload, callback) => {
+      if (refuseIfFlooding(userId, callback)) return;
+
       if (!isAttachableKey(payload.assetKey)) {
         callback({ ok: false, error: "INVALID_ASSET" });
         return;
@@ -550,6 +591,8 @@ export function attachSocketServer(httpServer: HttpServer): ChatServer {
      * is Accepted, so it is broadcast before the ack goes back.
      */
     socket.on("message:sendGif", (payload, callback) => {
+      if (refuseIfFlooding(userId, callback)) return;
+
       assertParticipant(userId, payload.conversationId)
         .then(async () => {
           const gif = await gifProvider().resolve(payload.gifId);
@@ -590,6 +633,8 @@ export function attachSocketServer(httpServer: HttpServer): ChatServer {
      * and builds the URL from what it finds, so the ids never become a path.
      */
     socket.on("message:sendSticker", (payload, callback) => {
+      if (refuseIfFlooding(userId, callback)) return;
+
       sendStickerMessage({
         senderId: userId,
         conversationId: payload.conversationId,

@@ -86,6 +86,21 @@ export function refuseUnsendableImage(file: File): void {
 }
 
 /**
+ * How long a refused upload says to wait, in whole seconds, or null.
+ *
+ * Read from the standard `Retry-After` header rather than from the body, so
+ * this keeps working if an intermediary answers with a bare 429 of its own.
+ * Null when there is no usable figure -- the caller then says "a moment"
+ * rather than printing a NaN at the sender.
+ */
+function retryAfterSeconds(response: Response): number | null {
+  const header = response.headers.get("Retry-After");
+  if (header === null) return null;
+  const seconds = Number(header);
+  return Number.isFinite(seconds) && seconds > 0 ? Math.ceil(seconds) : null;
+}
+
+/**
  * Uploads one image to quarantine and returns the key it landed under.
  *
  * Two requests, and the split is the whole point: the first asks this
@@ -107,6 +122,19 @@ export async function uploadToQuarantine(
   });
 
   if (!presign.ok) {
+    // A rate limit is told apart from every other refusal, because it is the
+    // only one where "try again" is wrong advice: trying again immediately is
+    // the behaviour the limit exists to stop. The sender is told to wait, and
+    // for roughly how long, so they back off rather than hammer.
+    if (presign.status === 429) {
+      const seconds = retryAfterSeconds(presign);
+      throw new ImageRejectedError(
+        seconds === null
+          ? "Too many uploads. Please wait a moment before sending another image."
+          : `Too many uploads. Please wait ${seconds} seconds before sending another image.`,
+      );
+    }
+
     // The server's refusal reasons are the same ones checked above, so reaching
     // here means either a race with a changed rule or a genuine fault. Either
     // way the sender gets one sentence rather than a status code.

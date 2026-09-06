@@ -4,7 +4,10 @@ import { createUser, resetDatabase } from "./setup/database";
 import { openConversation } from "@/server/conversations";
 import { readMessages, readableAsset, sendImageMessage } from "@/server/messages";
 import { NotAParticipantError } from "@/server/authorization";
-import { moderateImageMessage } from "@/server/moderation/pipeline";
+import {
+  moderateImageMessage,
+  NOT_AN_IMAGE_REASON,
+} from "@/server/moderation/pipeline";
 import { prisma } from "@/lib/db";
 
 /**
@@ -44,10 +47,23 @@ function sendImage(clientMessageId: string) {
   });
 }
 
+/**
+ * A minimal PNG signature, so the object a double hands back is something the
+ * pipeline recognises as an image.
+ *
+ * Real bytes rather than a placeholder string, because the pipeline now sniffs
+ * what it read before it classifies it -- a double returning arbitrary text
+ * would be refused for not being an image and every test below would be
+ * exercising that refusal instead of the case it names.
+ */
+const PNG_BYTES = Buffer.from([
+  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
+]);
+
 /** Storage doubles: enough surface for the pipeline, none of the bucket. */
 function storageDouble() {
   return {
-    readObject: vi.fn(async () => Buffer.from("bytes")),
+    readObject: vi.fn(async () => PNG_BYTES),
     promote: vi.fn(async (key: string) => key.replace("quarantine/", "attachments/")),
     discard: vi.fn(async () => {}),
   };
@@ -294,5 +310,85 @@ describe("readableAsset", () => {
     await expect(
       readableAsset({ userId: ada.id, messageId: message.id }),
     ).rejects.toBeInstanceOf(NotAParticipantError);
+  });
+});
+
+/**
+ * The declared type is a claim the uploader makes; these are about the bytes
+ * disagreeing with it. What the signatures themselves recognise is tested in
+ * content-type.test.ts -- what is under test here is that the pipeline asks
+ * before it classifies, and refuses rather than delivers when the answer is no.
+ */
+describe("an object whose bytes are not an image", () => {
+  it("is refused without the classifier being asked", async () => {
+    const message = await sendImage("renamed-1");
+    const storage = storageDouble();
+    storage.readObject.mockResolvedValueOnce(
+      Buffer.from([0x4d, 0x5a, 0x90, 0x00, 0x03]),
+    );
+    const classify = vi.fn(async () => ({ refused: false }) as const);
+
+    const decided = await moderateImageMessage({
+      messageId: message.id,
+      assetKey: "quarantine/a-key",
+      classify,
+      storage,
+    });
+
+    expect(decided.status).toBe(MessageStatus.REJECTED);
+    // The point of sniffing before decoding: an executable never reaches the
+    // decoder, so it never becomes an allocation in the process the classifier
+    // already lives in.
+    expect(classify).not.toHaveBeenCalled();
+  });
+
+  it("names a reason distinct from an explicit image", async () => {
+    const message = await sendImage("renamed-2");
+    const storage = storageDouble();
+    storage.readObject.mockResolvedValueOnce(Buffer.from("%PDF-1.7", "ascii"));
+
+    const decided = await moderateImageMessage({
+      messageId: message.id,
+      assetKey: "quarantine/a-key",
+      classify: async () => ({ refused: false }),
+      storage,
+    });
+
+    // A sender who attached the wrong file must not be told their image was
+    // explicit, and a sender whose image was explicit must not be told it was
+    // the wrong format.
+    expect(decided.moderationReason).toBe(NOT_AN_IMAGE_REASON);
+  });
+
+  it("is discarded from quarantine rather than promoted", async () => {
+    const message = await sendImage("renamed-3");
+    const storage = storageDouble();
+    storage.readObject.mockResolvedValueOnce(Buffer.from("<svg/>", "utf8"));
+
+    await moderateImageMessage({
+      messageId: message.id,
+      assetKey: "quarantine/a-key",
+      classify: async () => ({ refused: false }),
+      storage,
+    });
+
+    expect(storage.promote).not.toHaveBeenCalled();
+    expect(storage.discard).toHaveBeenCalledWith("quarantine/a-key");
+  });
+
+  it("never reaches the recipient", async () => {
+    const message = await sendImage("renamed-4");
+    const storage = storageDouble();
+    storage.readObject.mockResolvedValueOnce(Buffer.from("not an image", "utf8"));
+
+    await moderateImageMessage({
+      messageId: message.id,
+      assetKey: "quarantine/a-key",
+      classify: async () => ({ refused: false }),
+      storage,
+    });
+
+    const seen = await readMessages({ userId: grace.id, conversationId, limit: 50 });
+    expect(seen.messages.some((held) => held.id === message.id)).toBe(false);
   });
 });

@@ -4,6 +4,22 @@ import { auth } from "@/lib/auth";
 import { assertParticipant, NotAParticipantError } from "@/server/authorization";
 import { validateUploadRequest } from "@/lib/upload-rules";
 import { presignUpload } from "@/server/storage";
+import { createRateLimiter, RATE_LIMITS } from "@/lib/rate-limit";
+
+/**
+ * What one account may upload, held at module scope so it outlives a request.
+ *
+ * A limiter built per request would count to one and forget, which is to say
+ * it would not be a limiter at all. Module scope is what gives it the lifetime
+ * of the process -- the same lifetime presence and typing have, and for the
+ * same reason (ADR-0001).
+ *
+ * This is the tightest of the three limits because an upload is the most
+ * expensive thing an authenticated caller can ask for: each one buys them an
+ * object in the bucket and an inference on the WASM backend (ADR-0007) inside
+ * a 512 MB process.
+ */
+const uploadLimiter = createRateLimiter(RATE_LIMITS.upload);
 
 /**
  * Issues the capability to upload one image, straight to object storage.
@@ -43,12 +59,38 @@ export async function POST(
     return NextResponse.json({ error: "UNAUTHENTICATED" }, { status: 401 });
   }
 
+  /**
+   * Keyed on the session's user id rather than on the address the request came
+   * from. Behind the deployment's proxy every request shares one address, so an
+   * address-keyed limit would refuse everybody the moment one account flooded --
+   * and the forwarded-for header that would distinguish them is written by the
+   * client. Checked after the session for exactly that reason: the key does not
+   * exist until the caller is identified.
+   */
+  const decision = uploadLimiter.consume(session.user.id);
+  if (!decision.allowed) {
+    const retryAfterSeconds = Math.ceil(decision.retryAfterMs / 1000);
+    return NextResponse.json(
+      { error: "RATE_LIMITED", retryAfterMs: decision.retryAfterMs },
+      {
+        status: 429,
+        // The standard header as well as the body, so an intermediary or a
+        // client library that already understands backing off does not have to
+        // be taught this application's JSON to do it.
+        headers: { "Retry-After": String(retryAfterSeconds) },
+      },
+    );
+  }
+
   const { conversationId } = await params;
 
   let body: { contentType?: unknown; contentLength?: unknown };
   try {
     body = (await request.json()) as typeof body;
   } catch {
+    // Released for the same reason as a failed validation below: nothing was
+    // signed, so nothing was spent.
+    uploadLimiter.release(session.user.id);
     return NextResponse.json({ error: "INVALID_REQUEST" }, { status: 400 });
   }
 
@@ -61,6 +103,11 @@ export async function POST(
 
   const validation = validateUploadRequest({ contentType, contentLength });
   if (!validation.ok) {
+    // Released, because a malformed request cost nothing worth rationing --
+    // no URL was signed and no object can land. Counting it would let a client
+    // spend a sender's whole allowance on requests that were never going to
+    // store anything.
+    uploadLimiter.release(session.user.id);
     return NextResponse.json({ error: validation.error }, { status: 400 });
   }
 

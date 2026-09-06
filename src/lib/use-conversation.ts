@@ -34,6 +34,7 @@ import {
   uploadToQuarantine,
 } from "./image-upload";
 import { findSticker, stickerUrl } from "./sticker-packs";
+import { RATE_LIMITS } from "./rate-limit";
 import { isAfter, maxSequence, type Sequence } from "./sequence";
 import type { SendReply, SyncReply } from "./socket-events";
 import type { WireMessage, WireMessagePage } from "./wire";
@@ -283,6 +284,31 @@ export function useConversation(
    * retries it under the same Client Message Id, which is why an outage that
    * outlasts the socket does not cost the sender their Message.
    */
+  /**
+   * Timers for sends waiting out a rate limit, so they can be cancelled.
+   *
+   * Held per Client Message Id rather than as one timer, because two sends can
+   * be waiting at once -- and cleared when the Conversation closes, so a
+   * scheduled retry does not fire into a component that has gone.
+   */
+  const backoffTimersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  useEffect(() => {
+    const timers = backoffTimersRef.current;
+    return () => {
+      for (const timer of timers.values()) clearTimeout(timer);
+      timers.clear();
+    };
+  }, [conversationId]);
+
+  /**
+   * `emitSend` reaching itself, so a rate-limited send can put itself back on
+   * the wire once its interval has passed. A ref rather than a recursive
+   * `useCallback`, which cannot refer to itself while it is being defined.
+   */
+  const emitSendRef = useRef<
+    ((activeSocket: ChatSocket, entry: OutboxEntry) => void) | null
+  >(null);
+
   const emitSend = useCallback((activeSocket: ChatSocket, entry: OutboxEntry) => {
     // One settle path for both kinds. The two events differ only in what they
     // carry -- a body or a key -- and every outcome after the ack is identical,
@@ -294,6 +320,43 @@ export function useConversation(
         if (reply.ok) {
           if (store) settleSend(store, entry.conversationId, entry.clientMessageId);
           setState((current) => applyAccepted(current, reply.message));
+          return;
+        }
+
+        /**
+         * A rate limit is the one refusal that becomes acceptance simply by
+         * waiting, so it is handled before the permanence question is asked.
+         *
+         * The send stays in the outbox and is retried once -- after the
+         * interval the server named, not immediately. Retrying immediately is
+         * precisely the hammering the limit exists to stop, and it would be
+         * refused again anyway. The Message is left rendered as pending rather
+         * than marked failed, because from the sender's point of view it is
+         * still on its way.
+         *
+         * Should the retry be refused again, it takes this same path and waits
+         * again -- so a client that is genuinely over its allowance backs off
+         * repeatedly rather than escalating.
+         */
+        if (reply.error === "RATE_LIMITED") {
+          const timers = backoffTimersRef.current;
+          clearTimeout(timers.get(entry.clientMessageId));
+          // Falls back to the send window if the server named no interval, so
+          // a reply missing the field still waits rather than retrying at once.
+          const waitMs = reply.retryAfterMs ?? RATE_LIMITS.send.windowMs;
+          timers.set(
+            entry.clientMessageId,
+            setTimeout(() => {
+              timers.delete(entry.clientMessageId);
+              // Read from the ref at fire time rather than captured, and the
+              // socket checked: the connection may have gone while waiting, in
+              // which case the reconnect retry above picks the entry up from
+              // the outbox where it still sits.
+              if (activeSocket.connected) {
+                emitSendRef.current?.(activeSocket, entry);
+              }
+            }, waitMs),
+          );
           return;
         }
 
@@ -394,6 +457,8 @@ export function useConversation(
       onReply,
     );
   }, []);
+
+  emitSendRef.current = emitSend;
 
   /**
    * Rejoins, recovers what was missed, then retries what was never acknowledged.

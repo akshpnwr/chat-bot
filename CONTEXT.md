@@ -64,3 +64,26 @@ _Avoid_: Timestamp, index, position, offset
 The most recent Message a client already holds, sent on reconnection so the server can return
 only what was missed. A reading of that Message's Sequence.
 _Avoid_: Watermark, offset, checkpoint
+
+**Allowance**:
+How much of a rate-limited action one identity may take within the window that action is measured
+over. Held in the application process's memory and keyed on the User the server established — or,
+for sign-in, on the email address, since there is no User yet. Spending an Allowance in full does
+not Refuse the Message: it defers it, and the sender's client waits out the stated interval and
+sends the same Message again under its original Client Message Id. Distinct from a Refusal, which
+is a ruling on the Message itself and never becomes acceptance by being repeated.
+_Avoid_: Quota, budget, throttle, bucket
+
+**Quarantine**:
+Where an uploaded image sits between landing in object storage and being ruled on. A Message may
+point at a quarantined object, but no reader can reach one: an object leaves Quarantine only by
+being promoted after it has passed moderation, or by being discarded after it has not. The
+prefix, not a column, is what makes the set of reachable objects exactly the set that cleared.
+_Avoid_: Staging, pending bucket, temp
+
+**Declared Type**:
+The content type a client claims for a file when asking to upload it. It is checked before an
+upload URL is signed and then pinned into the signed URL — but it remains a claim, so it is never
+what decides whether an object is an image. That is settled from the bytes themselves when the
+object is read back for moderation.
+_Avoid_: MIME type, file type, content type (unqualified)

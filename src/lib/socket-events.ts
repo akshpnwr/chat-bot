@@ -110,6 +110,15 @@ export type SendError =
   | "GIF_UNAVAILABLE"
   /** No such sticker in any bundled pack -- see `message:sendSticker`. */
   | "UNKNOWN_STICKER"
+  /**
+   * The sender has done this too often and should wait before trying again.
+   *
+   * Distinct from every other refusal on this list in one way that matters to
+   * the client: it is the only one that becomes acceptance simply by being
+   * retried later. So it carries `retryAfterMs` and the send stays in the
+   * outbox -- a refusal a client is meant to survive rather than abandon.
+   */
+  | "RATE_LIMITED"
   | "INTERNAL";
 
 /** The reply to a sync: the Messages missed, or why the gap could not be read. */
@@ -137,7 +146,18 @@ export type SyncReply =
  */
 export type SendReply =
   | { ok: true; message: WireMessage }
-  | { ok: false; error: SendError; term?: string };
+  | {
+      ok: false;
+      error: SendError;
+      term?: string;
+      /**
+       * How long to wait before this send could succeed, set only on
+       * `RATE_LIMITED`. Present so a refused client backs off for a stated
+       * interval rather than guessing -- and a guessing client retries
+       * immediately, which is the behaviour the limit exists to stop.
+       */
+      retryAfterMs?: number;
+    };
 
 /**
  * The reply to a join: the Conversation's live state as it stands right now.
