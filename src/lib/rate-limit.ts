@@ -86,14 +86,18 @@ export function createRateLimiter(
   const attempts = new Map<string, number[]>();
 
   /**
-   * Drops attempts that have aged out, and forgets a key left with none.
+   * Drops attempts that have aged out and returns what is left.
+   *
+   * It writes as well as reads -- expired entries are removed and a key left
+   * with none is forgotten -- which the name says so a caller does not mistake
+   * it for a query.
    *
    * Called on every read, which is what keeps the map bounded without a timer.
    * Ageing out is the one way an attempt is forgotten without an event, so a
    * key nobody has used since would otherwise sit in memory for the life of
    * the process -- one row per user who has ever sent a Message.
    */
-  function fresh(key: string): number[] {
+  function sweepAndRead(key: string): number[] {
     const held = attempts.get(key);
     if (held === undefined) return [];
 
@@ -113,7 +117,7 @@ export function createRateLimiter(
 
   return {
     consume(key) {
-      const live = fresh(key);
+      const live = sweepAndRead(key);
 
       if (live.length >= rule.limit) {
         // Counted from the oldest attempt still standing: that is the one whose
@@ -131,7 +135,7 @@ export function createRateLimiter(
     },
 
     release(key) {
-      const live = fresh(key);
+      const live = sweepAndRead(key);
       if (live.length === 0) return;
 
       live.pop();
@@ -144,7 +148,7 @@ export function createRateLimiter(
     trackedKeys() {
       // Swept first, so a key whose attempts have all aged out is not reported
       // as tracked merely because nothing has looked at it since.
-      for (const key of [...attempts.keys()]) fresh(key);
+      for (const key of [...attempts.keys()]) sweepAndRead(key);
       return [...attempts.keys()];
     },
   };

@@ -27,15 +27,19 @@
 export type SniffedImageType = "image/jpeg" | "image/png" | "image/gif" | "image/webp";
 
 /**
- * A signature, as a run of bytes at a fixed offset.
+ * A signature, as the run of bytes a file of that format begins with.
  *
  * Held as `(number | null)[]` so a wildcard is expressible: WebP's tag sits
  * after four length bytes whose values are the file's size and therefore
  * arbitrary, and matching them would mean matching one particular file size.
+ *
+ * Anchored at the start rather than carrying an offset, because all four
+ * formats identify themselves there. A format that did not could be given one
+ * when it arrives; an offset every signature sets to zero is arithmetic in
+ * `matches` for a case that does not exist.
  */
 interface Signature {
   type: SniffedImageType;
-  offset: number;
   bytes: (number | null)[];
 }
 
@@ -52,30 +56,28 @@ function ascii(text: string): number[] {
  * chunk length.
  */
 const SIGNATURES: Signature[] = [
-  { type: "image/jpeg", offset: 0, bytes: [0xff, 0xd8, 0xff] },
-  { type: "image/png", offset: 0, bytes: [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a] },
+  { type: "image/jpeg", bytes: [0xff, 0xd8, 0xff] },
+  { type: "image/png", bytes: [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a] },
   // Both GIF versions, spelled out rather than matched on `GIF` alone: the
   // three-letter prefix is what a crafted file would carry, and the version
   // tag is what a real one does.
-  { type: "image/gif", offset: 0, bytes: ascii("GIF87a") },
-  { type: "image/gif", offset: 0, bytes: ascii("GIF89a") },
+  { type: "image/gif", bytes: ascii("GIF87a") },
+  { type: "image/gif", bytes: ascii("GIF89a") },
   {
     type: "image/webp",
-    offset: 0,
     bytes: [...ascii("RIFF"), null, null, null, null, ...ascii("WEBP")],
   },
 ];
 
 function matches(image: Buffer, signature: Signature): boolean {
-  const end = signature.offset + signature.bytes.length;
   // Checked before indexing rather than relying on `undefined` comparing
   // unequal: a truncated file must be refused for being too short to identify,
   // not accepted because a missing byte happened to satisfy a wildcard.
-  if (image.length < end) return false;
+  if (image.length < signature.bytes.length) return false;
 
   return signature.bytes.every((expected, index) => {
     if (expected === null) return true;
-    return image[signature.offset + index] === expected;
+    return image[index] === expected;
   });
 }
 

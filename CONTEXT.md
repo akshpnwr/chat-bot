@@ -72,7 +72,7 @@ for sign-in, on the email address, since there is no User yet. Spending an Allow
 not Refuse the Message: it defers it, and the sender's client waits out the stated interval and
 sends the same Message again under its original Client Message Id. Distinct from a Refusal, which
 is a ruling on the Message itself and never becomes acceptance by being repeated.
-_Avoid_: Quota, budget, throttle, bucket
+_Avoid_: Quota, budget, rate limit (as a noun for the remaining amount)
 
 **Quarantine**:
 Where an uploaded image sits between landing in object storage and being ruled on. A Message may
@@ -86,4 +86,5 @@ The content type a client claims for a file when asking to upload it. It is chec
 upload URL is signed and then pinned into the signed URL — but it remains a claim, so it is never
 what decides whether an object is an image. That is settled from the bytes themselves when the
 object is read back for moderation.
-_Avoid_: MIME type, file type, content type (unqualified)
+_Avoid_: MIME type, file type; and never a bare "type" where it could be read as
+the type settled from the bytes
