@@ -1,10 +1,62 @@
 import { MessageKind, MessageStatus, Prisma, type Message } from "@prisma/client";
 import { prisma } from "@/lib/db";
+import { findSticker, stickerUrl } from "@/lib/sticker-packs";
 import { assertParticipant, NotAParticipantError } from "@/server/authorization";
 import { screen } from "@/server/moderation/profanity";
 
 /** Postgres' unique-violation code, raised by the idempotency constraint. */
 const UNIQUE_VIOLATION = "P2002";
+
+/**
+ * Raised when a client names a sticker no bundled pack contains.
+ *
+ * A sticker is the one asset kind that skips classification, and the excuse
+ * for that is entirely that the artwork ships with the application. An
+ * unrecognised sticker is therefore not a missing file to shrug at but the
+ * exact case that excuse does not cover, so it is refused rather than stored.
+ */
+export class UnknownStickerError extends Error {
+  readonly code = "UNKNOWN_STICKER";
+
+  constructor(packId: string, stickerId: string) {
+    super(`No such sticker: ${packId}/${stickerId}`);
+    this.name = "UnknownStickerError";
+  }
+}
+
+/**
+ * Writes a Message, resolving the idempotency constraint if it fires.
+ *
+ * Shared by every send in this module because the resolution is the same one
+ * each time: the insert is attempted unconditionally, and a unique violation
+ * means a concurrent or retried send already stored this Client Message Id --
+ * so the answer is that Message rather than a second one or an error. Writing
+ * it once means a new kind of Message cannot accidentally be given weaker
+ * idempotency than the kinds beside it.
+ */
+async function createIdempotently(
+  data: Prisma.MessageUncheckedCreateInput,
+): Promise<Message> {
+  try {
+    return await prisma.message.create({ data });
+  } catch (error) {
+    if (
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      error.code === UNIQUE_VIOLATION
+    ) {
+      const existing = await prisma.message.findUnique({
+        where: {
+          conversationId_clientMessageId: {
+            conversationId: data.conversationId,
+            clientMessageId: data.clientMessageId,
+          },
+        },
+      });
+      if (existing) return existing;
+    }
+    throw error;
+  }
+}
 
 /**
  * Raised when a Message is refused for prohibited language.
@@ -78,22 +130,7 @@ export async function sendMessage({
     throw new ProhibitedLanguageError(screening.term);
   }
 
-  try {
-    return await prisma.message.create({
-      data: { senderId, conversationId, clientMessageId, body },
-    });
-  } catch (error) {
-    if (
-      error instanceof Prisma.PrismaClientKnownRequestError &&
-      error.code === UNIQUE_VIOLATION
-    ) {
-      const existing = await prisma.message.findUnique({
-        where: { conversationId_clientMessageId: { conversationId, clientMessageId } },
-      });
-      if (existing) return existing;
-    }
-    throw error;
-  }
+  return createIdempotently({ senderId, conversationId, clientMessageId, body });
 }
 
 /** A page of history, newest first, with the cursor to continue backwards. */
@@ -282,31 +319,16 @@ export async function sendImageMessage({
 }): Promise<Message> {
   await assertParticipant(senderId, conversationId);
 
-  try {
-    return await prisma.message.create({
-      data: {
-        senderId,
-        conversationId,
-        clientMessageId,
-        kind: MessageKind.IMAGE,
-        status: MessageStatus.PENDING,
-        assetUrl: assetKey,
-        assetWidth,
-        assetHeight,
-      },
-    });
-  } catch (error) {
-    if (
-      error instanceof Prisma.PrismaClientKnownRequestError &&
-      error.code === UNIQUE_VIOLATION
-    ) {
-      const existing = await prisma.message.findUnique({
-        where: { conversationId_clientMessageId: { conversationId, clientMessageId } },
-      });
-      if (existing) return existing;
-    }
-    throw error;
-  }
+  return createIdempotently({
+    senderId,
+    conversationId,
+    clientMessageId,
+    kind: MessageKind.IMAGE,
+    status: MessageStatus.PENDING,
+    assetUrl: assetKey,
+    assetWidth,
+    assetHeight,
+  });
 }
 
 /**
@@ -436,4 +458,102 @@ export async function readableAsset({
   }
 
   return message.assetUrl;
+}
+
+/**
+ * Sends a GIF into a Conversation, Accepted and visible immediately.
+ *
+ * No PENDING state, and that is ADR-0003's reasoning applied rather than
+ * skipped. The asynchronous path exists because an uploaded image is content
+ * nobody has looked at, and the delay buys the look. A GIF is not that: the
+ * URL stored here is one the *provider* returned for an id, resolved
+ * server-side (see `src/server/gifs/tenor.ts`), so a sender can only ever
+ * attach something the provider indexed. There is nothing left to wait for,
+ * and making the sender watch a spinner would be a delay that buys no safety.
+ *
+ * The caller resolves the GIF before calling this. That split is deliberate:
+ * this module stays the place Messages are written and knows nothing about a
+ * third party's API, while the guarantee that a client cannot name an arbitrary
+ * URL lives in the one module that talks to the provider.
+ *
+ * Membership and idempotency work exactly as they do for text and images --
+ * the same guard, the same constraint, resolved the same way.
+ */
+export async function sendGifMessage({
+  senderId,
+  conversationId,
+  clientMessageId,
+  gif,
+}: {
+  senderId: string;
+  conversationId: string;
+  clientMessageId: string;
+  /** Already resolved by the provider; never a URL a client supplied. */
+  gif: { url: string; width: number; height: number; description: string };
+}): Promise<Message> {
+  await assertParticipant(senderId, conversationId);
+
+  return createIdempotently({
+    senderId,
+    conversationId,
+    clientMessageId,
+    kind: MessageKind.GIF,
+    status: MessageStatus.VISIBLE,
+    // The description rather than a caption: a GIF has no message text, and
+    // this is what the bubble reads out as alt text. Storing it here means the
+    // thread stays legible to a screen reader without a second fetch.
+    body: gif.description,
+    assetUrl: gif.url,
+    assetWidth: gif.width,
+    assetHeight: gif.height,
+  });
+}
+
+/**
+ * Sends a sticker from a bundled pack, Accepted and visible immediately.
+ *
+ * The registry is consulted rather than trusted, and that lookup is the whole
+ * of the safety argument. A sticker skips classification because its artwork
+ * ships with the application -- so what is stored has to be a file the
+ * application actually ships, which means the URL is built from the `Sticker`
+ * the registry returned rather than assembled from the ids that arrived. Ids
+ * carrying path segments therefore find nothing rather than escaping the pack.
+ *
+ * Membership is checked before the registry, so a stranger is refused for being
+ * a stranger rather than told which sticker ids exist.
+ */
+export async function sendStickerMessage({
+  senderId,
+  conversationId,
+  clientMessageId,
+  packId,
+  stickerId,
+}: {
+  senderId: string;
+  conversationId: string;
+  clientMessageId: string;
+  packId: string;
+  stickerId: string;
+}): Promise<Message> {
+  await assertParticipant(senderId, conversationId);
+
+  const sticker = findSticker(packId, stickerId);
+  if (!sticker) throw new UnknownStickerError(packId, stickerId);
+
+  return createIdempotently({
+    senderId,
+    conversationId,
+    clientMessageId,
+    kind: MessageKind.STICKER,
+    status: MessageStatus.VISIBLE,
+    // The label, as the bubble's alt text -- a sticker is an image, and one
+    // rendered with no alternative text is one a screen reader cannot convey.
+    body: sticker.label,
+    assetUrl: stickerUrl(packId, sticker),
+    // Known from the registry rather than measured in a browser: the artwork is
+    // fixed at build time, so there is nothing to measure and the bubble can
+    // reserve its space with no round trip at all.
+    assetWidth: sticker.width,
+    assetHeight: sticker.height,
+  });
 }
