@@ -70,6 +70,12 @@ export interface WireConversation {
   latestMessage: WireLatestMessage | null;
   /** The viewer's Read Mark -- a reading of a Sequence, so likewise a string. */
   lastReadSeq: Sequence;
+  /**
+   * The Unread Count. A number rather than a string, unlike the Sequences
+   * above: it counts Messages rather than naming one, so it is bounded by how
+   * many exist rather than by BIGSERIAL, and ADR-0006 does not apply to it.
+   */
+  unreadCount: number;
 }
 
 export function toWireConversation(summary: ConversationSummary): WireConversation {
@@ -89,6 +95,7 @@ export function toWireConversation(summary: ConversationSummary): WireConversati
             createdAt: latest.createdAt.toISOString(),
           },
     lastReadSeq: summary.lastReadSeq.toString(),
+    unreadCount: summary.unreadCount,
   };
 }
 

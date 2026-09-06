@@ -22,6 +22,41 @@ export interface ServerToClientEvents {
    * the Message too.
    */
   "message:new": (message: WireMessage) => void;
+  /**
+   * A Participant's Read Mark has moved. Sent to the Conversation's room, so
+   * the sender learns their Message was read and the reader's own other tabs
+   * clear the same badge.
+   *
+   * It carries whose mark moved because a room holds both Participants, and a
+   * reader must not settle their own unread count against the other side's
+   * mark. That is the one user id in these payloads the server puts there
+   * itself -- never one a client claimed.
+   */
+  "conversation:read": (payload: {
+    conversationId: string;
+    userId: string;
+    lastReadSeq: Sequence;
+  }) => void;
+  /**
+   * Who is typing in a Conversation right now -- the whole set, not a delta.
+   *
+   * A set rather than "X started" / "X stopped" because a delta stream is one
+   * a client can fall out of step with: a missed "stopped" during a blip
+   * leaves an indicator on screen that nothing will ever clear. Each broadcast
+   * being the complete answer means the next one repairs whatever the last one
+   * missed.
+   */
+  "conversation:typing": (payload: {
+    conversationId: string;
+    /** Typists other than the recipient; a client is never told it is typing. */
+    userIds: string[];
+  }) => void;
+  /**
+   * A User's Presence changed. Sent only on a real transition -- their first
+   * connection or their last -- so opening a second tab does not make the
+   * other side's indicator flicker.
+   */
+  "presence:changed": (payload: { userId: string; online: boolean }) => void;
 }
 
 /**
@@ -50,15 +85,85 @@ export type SendReply =
   | { ok: true; message: WireMessage }
   | { ok: false; error: SendError };
 
+/**
+ * The reply to a join: the Conversation's live state as it stands right now.
+ *
+ * Presence and typing exist only in process memory (ADR-0001) and are
+ * broadcast on transition, so this snapshot is the only way a client that
+ * arrives between transitions learns the current answer.
+ */
+export type JoinReply =
+  | {
+      ok: true;
+      /** Whether the other Participant currently holds any live connection. */
+      otherOnline: boolean;
+      /** Who is typing right now, the joining client itself excluded. */
+      typing: string[];
+      /** The other Participant's Read Mark, so a sender sees what was read. */
+      otherLastReadSeq: Sequence;
+    }
+  | { ok: false; error: string };
+
 export interface ClientToServerEvents {
   ping: (callback: (reply: { ok: true; at: number }) => void) => void;
   /**
    * Join a Conversation's broadcast room. The server runs the membership guard
    * before joining, so a non-member never enters the room at all.
+   *
+   * The reply carries the Conversation's current live state rather than only
+   * an acknowledgement. Presence and typing are broadcast on transition, and a
+   * client that joined after the last transition would otherwise have to wait
+   * for the next one -- showing the other Participant as offline until they
+   * happen to reconnect. Answering with the state as it stands is what makes
+   * a reconnecting client's view correct immediately.
    */
   "conversation:join": (
     payload: { conversationId: string },
-    callback: (reply: { ok: true } | { ok: false; error: string }) => void,
+    callback: (reply: JoinReply) => void,
+  ) => void;
+  /**
+   * Advance the sender's Read Mark to a Sequence they have read up to.
+   *
+   * The mark can only move forward, and that is enforced by the server rather
+   * than trusted from here (see `advanceReadMark`) -- two tabs advancing at
+   * once would otherwise walk it backwards.
+   */
+  "conversation:read": (
+    payload: { conversationId: string; upTo: Sequence },
+    callback: (reply: { ok: true; lastReadSeq: Sequence } | { ok: false; error: SendError }) => void,
+  ) => void;
+  /**
+   * Announce that the sender is typing, or has stopped.
+   *
+   * Throttled by the client rather than emitted per keystroke, and renewed
+   * while composing continues: the server holds it as a lease that lapses on
+   * its own, so a typist who vanishes mid-word needs no event to clear them.
+   *
+   * Deliberately without an acknowledgement. A typing announcement that did
+   * not arrive is corrected by the next one a second or two later, and by the
+   * lease lapsing if there is no next one -- so there is nothing a callback
+   * could usefully do, and every keystroke burst would pay for a round trip.
+   */
+  "conversation:typing": (payload: {
+    conversationId: string;
+    typing: boolean;
+  }) => void;
+  /**
+   * Ask which of these Users are online right now.
+   *
+   * Presence is announced on transition, so a client that connects while
+   * somebody is already online never hears about them. This is the snapshot
+   * that fills that gap -- asked for on connect and on every reconnect, since
+   * a reconnection returns to a server that may have changed its mind about
+   * everybody while the client was away.
+   *
+   * Answering is not a disclosure: Presence for these Users is already
+   * broadcast to every connected client, so this reports what the client would
+   * learn by waiting.
+   */
+  "presence:snapshot": (
+    payload: { userIds: string[] },
+    callback: (reply: { ok: true; online: string[] }) => void,
   ) => void;
   /**
    * Ask for the Messages missed while away, from the Sync Cursor forward.

@@ -64,6 +64,7 @@ describe("toWireConversation", () => {
       createdAt: new Date("2026-09-05T10:00:00.000Z"),
     },
     lastReadSeq: 7n,
+    unreadCount: 3,
   };
 
   it("carries both Sequences as strings", () => {
@@ -71,6 +72,12 @@ describe("toWireConversation", () => {
 
     expect(wire.latestMessage?.seq).toBe("42");
     expect(wire.lastReadSeq).toBe("7");
+  });
+
+  it("carries the Unread Count as the number it is", () => {
+    // A count is not a Sequence: it is bounded by how many Messages exist, not
+    // by BIGSERIAL, so it crosses the wire as a number rather than a string.
+    expect(toWireConversation(summary).unreadCount).toBe(3);
   });
 
   it("survives JSON.stringify", () => {

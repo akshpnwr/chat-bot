@@ -19,10 +19,18 @@ import { Button } from "@/components/ui/button";
 export function Composer({
   onSend,
   offline = false,
+  onTyping,
 }: {
   onSend: (body: string) => void;
   /** Changes what the box says, never whether it accepts what is typed. */
   offline?: boolean;
+  /**
+   * Called on each keystroke, and with false when the box empties. Throttling
+   * belongs to the caller, not here -- the composer's job is to report what
+   * the user did, and how often that reaches the server is a decision about
+   * the wire rather than about this box.
+   */
+  onTyping?: (typing: boolean) => void;
 }) {
   const [value, setValue] = useState("");
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -32,6 +40,11 @@ export function Composer({
     if (body.length === 0) return;
     onSend(body);
     setValue("");
+    // Sending ends composing. The caller stops announcing on send as well, so
+    // this is belt-and-braces rather than the only path -- but a composer that
+    // clears itself while still reporting "typing" would be lying about its
+    // own state.
+    onTyping?.(false);
     // Height was grown to fit the draft; a cleared box should not stay tall.
     if (inputRef.current) inputRef.current.style.height = "auto";
   }
@@ -53,7 +66,12 @@ export function Composer({
         }
         aria-label="Message"
         onChange={(event) => {
-          setValue(event.target.value);
+          const next = event.target.value;
+          setValue(next);
+          // Emptying the box is stopping, not typing. A reader who deletes
+          // their draft has visibly stopped composing, and leaving the
+          // indicator up until the idle timer noticed would say otherwise.
+          onTyping?.(next.trim().length > 0);
           // Grows with the draft up to a cap, past which it scrolls -- so a
           // long message never pushes the Conversation off the screen.
           const element = event.target;

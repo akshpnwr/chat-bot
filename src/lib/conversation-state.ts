@@ -264,3 +264,28 @@ export function applyRetrying(
 
   return changed ? { ...state, entries } : state;
 }
+
+/**
+ * Whether a Message has been read by the other Participant.
+ *
+ * The Read Mark is a high-water mark rather than a per-Message flag
+ * (CONTEXT.md: Read Mark), so this is a comparison rather than a lookup: every
+ * Message at or below the mark is read, everything above it is not. That is
+ * what lets one number answer the question for ten thousand Messages, and why
+ * a receipt cannot disagree with the unread count -- both read the same value.
+ *
+ * A Message with no Sequence has not been Accepted yet, so it cannot have been
+ * read. Returning false for it is not a default: an unsent Message is
+ * genuinely unread, and treating a missing Sequence as "at or below" would
+ * show a receipt on a Message the recipient has never been sent.
+ *
+ * The comparison goes through the Sequence helper (ADR-0006) -- comparing the
+ * strings directly would report Message "10" as unread against a mark of "9".
+ */
+export function isRead(
+  entry: Pick<ConversationEntry, "seq">,
+  otherLastReadSeq: Sequence,
+): boolean {
+  if (entry.seq === null) return false;
+  return compareSequence(entry.seq, otherLastReadSeq) <= 0;
+}

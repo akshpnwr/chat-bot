@@ -20,12 +20,28 @@ import {
   type OutboxEntry,
   type OutboxStore,
 } from "./outbox";
-import { maxSequence, type Sequence } from "./sequence";
+import {
+  createTypingAnnouncer,
+  TYPING_IDLE_MS,
+  type TypingAnnouncer,
+} from "./typing-announcer";
+import { isAfter, maxSequence, type Sequence } from "./sequence";
 import type { SyncReply } from "./socket-events";
 import type { WireMessage, WireMessagePage } from "./wire";
 
 /** How many Messages a page of history holds. */
 const PAGE_SIZE = 50;
+
+/**
+ * How often the announcer is asked whether the reader has gone idle.
+ *
+ * A fraction of the idle threshold, so a pause is noticed close to when it
+ * actually crosses it rather than up to a full threshold late. This is a
+ * polling interval rather than a timer set per keystroke -- one interval for
+ * the open Conversation, instead of a timer created and cleared on every
+ * letter typed.
+ */
+const TYPING_TICK_MS = Math.floor(TYPING_IDLE_MS / 3);
 
 /**
  * How many sync rounds one recovery drains before stopping.
@@ -55,6 +71,12 @@ export interface OpenConversation {
   error: string | null;
   send: (body: string) => void;
   loadOlder: () => void;
+  /**
+   * Announces that the reader is composing, or has stopped. Throttled inside
+   * (see `typing-announcer.ts`) rather than by the caller, so a component
+   * calling this on every keystroke is doing the right thing.
+   */
+  setTyping: (typing: boolean) => void;
 }
 
 /** One sync round trip, as a promise, so the drain below reads as a loop. */
@@ -115,6 +137,68 @@ export function useConversation(
   useEffect(() => {
     outboxRef.current = browserOutboxStore();
   }, []);
+
+  /**
+   * The typing announcer for the open Conversation, built by the effect near
+   * the bottom of this hook. Declared up here because `send` reaches for it to
+   * stop announcing the moment a Message goes out, and `send` is defined
+   * first.
+   */
+  const announcerRef = useRef<TypingAnnouncer | null>(null);
+
+  /**
+   * The Read Mark this browser has already announced.
+   *
+   * Held so the effect below only emits when the mark actually advances. The
+   * effect runs on every state change -- every Message, every settle -- and
+   * without this it would announce the same Sequence repeatedly, putting a
+   * write and a broadcast on the wire for each one.
+   */
+  const announcedReadRef = useRef<Sequence | null>(null);
+  useEffect(() => {
+    announcedReadRef.current = null;
+  }, [conversationId]);
+
+  /**
+   * Advances the reader's Read Mark to the newest Message they hold.
+   *
+   * Opening a Conversation is what marks it read, and so is receiving a
+   * Message while it is open -- both reduce to "the highest Sequence on
+   * screen", so both are this one effect rather than two call sites that could
+   * drift apart.
+   *
+   * It deliberately does not check whether the tab is focused. The ticket asks
+   * that opening a Conversation clears its unread count, and treating a
+   * background tab as unread would mean a badge that reappears when the reader
+   * switches windows without anything having arrived.
+   *
+   * Monotonicity is not enforced here. The server refuses a backwards advance
+   * (see `advanceReadMark`), which is the only place it can be enforced
+   * correctly with two tabs open -- so this is free to announce whatever it
+   * holds and let the server arbitrate.
+   */
+  useEffect(() => {
+    if (!socket || !conversationId) return;
+
+    const highest = highestSequence(state);
+    if (highest === null) return;
+    if (
+      announcedReadRef.current !== null &&
+      !isAfter(highest, announcedReadRef.current)
+    ) {
+      return;
+    }
+
+    announcedReadRef.current = highest;
+    socket.emit("conversation:read", { conversationId, upTo: highest }, (reply) => {
+      if (reply.ok) return;
+      // Left un-announced rather than retried here: the next Message to arrive
+      // advances the mark again, and a reconnection re-runs this effect with
+      // whatever the Conversation holds by then.
+      announcedReadRef.current = null;
+      console.error("[conversation] advancing the Read Mark failed", reply.error);
+    });
+  }, [socket, conversationId, state]);
 
   // The first page of a Conversation. Fetched fresh on every open rather than
   // cached, so a reader never opens a Conversation onto history that has since moved.
@@ -448,6 +532,12 @@ export function useConversation(
       // nothing to settle it; leaving it to the reconnection means one retry
       // path rather than two, and it is the path already under test.
       if (socket?.connected) emitSend(socket, entry);
+
+      // Sending ends composing, and says so at once rather than letting the
+      // idle timer notice a few seconds later -- by which point the Message
+      // itself has already arrived, and an indicator still claiming the sender
+      // is typing contradicts what the recipient can see.
+      announcerRef.current?.stop();
     },
     [socket, conversationId, viewerId, emitSend],
   );
@@ -483,5 +573,48 @@ export function useConversation(
       });
   }, [conversationId]);
 
-  return { state, loading, loadingOlder, syncing, error, send, loadOlder };
+  /**
+   * Announces typing, throttled, and stops on its own once the reader pauses.
+   *
+   * The announcer holds the throttle and the idle rule (see
+   * `typing-announcer.ts`); this effect owns only the two things that need
+   * React -- the interval that lets an idle pause be noticed, and the cleanup
+   * that stops announcing when the Conversation closes.
+   *
+   * The interval is what turns "stopped typing" from an event the user has to
+   * generate into the mere absence of one. Nothing the reader does says "I
+   * have stopped"; they simply stop, and the tick notices.
+   */
+  useEffect(() => {
+    if (!socket || !conversationId) {
+      announcerRef.current = null;
+      return;
+    }
+
+    const announcer = createTypingAnnouncer({
+      announce: (typing) => {
+        socket.emit("conversation:typing", { conversationId, typing });
+      },
+    });
+    announcerRef.current = announcer;
+
+    const interval = setInterval(() => announcer.tick(), TYPING_TICK_MS);
+
+    return () => {
+      clearInterval(interval);
+      announcerRef.current = null;
+      // Closing the Conversation ends composing in it. The server's lease
+      // would lapse on its own a few seconds later -- that is the guarantee --
+      // but saying so immediately means the other side's indicator clears when
+      // the reader actually stopped rather than seconds afterwards.
+      announcer.stop();
+    };
+  }, [socket, conversationId]);
+
+  const setTyping = useCallback((typing: boolean) => {
+    if (typing) announcerRef.current?.keystroke();
+    else announcerRef.current?.stop();
+  }, []);
+
+  return { state, loading, loadingOlder, syncing, error, send, loadOlder, setTyping };
 }

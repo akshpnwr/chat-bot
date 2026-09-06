@@ -95,12 +95,48 @@ export interface ConversationSummary {
   id: string;
   otherParticipant: OtherParticipant;
   latestMessage: LatestMessage | null;
-  /**
-   * The viewer's own Read Mark. Carried here so #8 derives the Unread Count
-   * from what the list already fetched, rather than from a stored counter --
-   * CONTEXT.md: "Unread Count: ... Derived, never stored."
-   */
+  /** The viewer's own Read Mark, so the list can show where they left off. */
   lastReadSeq: bigint;
+  /**
+   * The Messages after the viewer's Read Mark -- counted on read, never stored
+   * (CONTEXT.md: "Unread Count: ... Derived, never stored."). Deriving it is
+   * what keeps it from drifting out of step with the Read Mark it is defined
+   * against, which a maintained counter eventually would.
+   */
+  unreadCount: number;
+}
+
+/**
+ * How many Messages sit after a Participant's Read Mark.
+ *
+ * Three filters, each of which the badge would be wrong without:
+ *
+ *  - `seq > lastReadSeq` is the definition itself (CONTEXT.md: Unread Count).
+ *  - The viewer's own Messages are excluded. A Message you wrote is one you
+ *    have read, and counting it would raise a badge against the sender the
+ *    instant they sent something.
+ *  - Visibility is filtered exactly as every other read route filters it
+ *    (ADR-0003), so a Message held back by moderation cannot raise a badge
+ *    pointing at something the reader will never be shown -- a badge they
+ *    could never clear by reading.
+ */
+export async function unreadCount({
+  userId,
+  conversationId,
+  lastReadSeq,
+}: {
+  userId: string;
+  conversationId: string;
+  lastReadSeq: bigint;
+}): Promise<number> {
+  return prisma.message.count({
+    where: {
+      conversationId,
+      seq: { gt: lastReadSeq },
+      senderId: { not: userId },
+      status: MessageStatus.VISIBLE,
+    },
+  });
 }
 
 /**
@@ -145,8 +181,28 @@ export async function listConversations(userId: string): Promise<ConversationSum
     },
   });
 
+  // Counted per Conversation rather than in the query above, and issued
+  // together rather than one after another.
+  //
+  // Each count compares against that row's own Read Mark, which is a different
+  // value per row -- a correlated subquery Prisma's relation counts cannot
+  // express, since they take one filter for every row. Raw SQL could, and is
+  // the thing to reach for if this ever gets slow; it is not worth the cost
+  // here, because a one-to-one system gives a User as many Conversations as
+  // they have correspondents, and these run concurrently rather than serially.
+  const counted = await Promise.all(
+    memberships.map(async (membership) => ({
+      membership,
+      unread: await unreadCount({
+        userId,
+        conversationId: membership.conversation.id,
+        lastReadSeq: membership.lastReadSeq,
+      }),
+    })),
+  );
+
   const summaries: ConversationSummary[] = [];
-  for (const membership of memberships) {
+  for (const { membership, unread } of counted) {
     const other = membership.conversation.participants[0]?.user;
     // A Conversation is a pair by definition; one missing its other side is a
     // half-built row that nobody can open, so it is left out rather than
@@ -158,6 +214,7 @@ export async function listConversations(userId: string): Promise<ConversationSum
       otherParticipant: { id: other.id, name: other.name, image: other.image },
       latestMessage: membership.conversation.messages[0] ?? null,
       lastReadSeq: membership.lastReadSeq,
+      unreadCount: unread,
     });
   }
 

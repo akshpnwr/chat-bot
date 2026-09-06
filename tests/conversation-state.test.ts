@@ -4,6 +4,7 @@ import {
   applyOlderPage,
   applyPending,
   emptyConversation,
+  isRead,
   type ConversationState,
 } from "@/lib/conversation-state";
 import type { WireMessage } from "@/lib/wire";
@@ -231,5 +232,39 @@ describe("highestSequence", () => {
     });
 
     expect(highestSequence(state)).toBe("5");
+  });
+});
+
+describe("isRead", () => {
+  it("reports a Message at the Read Mark as read", () => {
+    // The Read Mark is a high-water mark: everything at or before it is read
+    // (CONTEXT.md: Read Mark), so the Message it names is itself read.
+    expect(isRead(wire("5"), "5")).toBe(true);
+  });
+
+  it("reports a Message below the Read Mark as read", () => {
+    expect(isRead(wire("3"), "5")).toBe(true);
+  });
+
+  it("reports a Message above the Read Mark as unread", () => {
+    expect(isRead(wire("7"), "5")).toBe(false);
+  });
+
+  it("compares Sequences numerically rather than as text", () => {
+    // "10" < "9" lexicographically, which is exactly the bug that would report
+    // a read Message as unread once a Conversation passed nine Messages.
+    expect(isRead(wire("9"), "10")).toBe(true);
+    expect(isRead(wire("10"), "9")).toBe(false);
+  });
+
+  it("reports a Message with no Sequence as unread", () => {
+    // A pending Message has not reached the server, so it cannot have been
+    // read -- and it must not be reported as read because its null compared
+    // favourably against something.
+    expect(isRead({ ...wire("5"), seq: null }, "5")).toBe(false);
+  });
+
+  it("reports nothing as read against a Read Mark of zero", () => {
+    expect(isRead(wire("1"), "0")).toBe(false);
   });
 });

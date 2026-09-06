@@ -8,9 +8,12 @@ import { ConnectionBadge } from "@/components/connection-badge";
 import { ConversationList } from "@/components/conversation-list";
 import { Composer } from "@/components/composer";
 import { MessageList } from "@/components/message-list";
+import { TypingIndicator } from "@/components/typing-indicator";
 import { signOut } from "@/lib/auth-client";
 import { useSocket } from "@/lib/use-socket";
 import { useConversation } from "@/lib/use-conversation";
+import { useLiveConversation } from "@/lib/use-presence";
+import { usePresentUsers } from "@/lib/use-present-users";
 import type { WireConversation } from "@/lib/wire";
 import { cn } from "@/lib/utils";
 
@@ -44,6 +47,26 @@ export function ConversationView({
     () => conversations.find((conversation) => conversation.id === selectedId) ?? null,
     [conversations, selectedId],
   );
+
+  // Presence for the whole list, tracked once rather than per row: a User is
+  // online or not, independently of which Conversation they appear in.
+  const correspondentIds = useMemo(
+    () => conversations.map((row) => row.otherParticipant.id),
+    [conversations],
+  );
+  const onlineUserIds = usePresentUsers(socket, correspondentIds);
+
+  // The open Conversation's live state -- the other side's typing and Read
+  // Mark. Presence for them comes from the set above rather than being tracked
+  // twice, so the header and their row in the list cannot disagree.
+  const live = useLiveConversation(
+    socket,
+    selectedId,
+    selected?.otherParticipant.id ?? null,
+  );
+  const otherOnline = selected
+    ? onlineUserIds.has(selected.otherParticipant.id)
+    : false;
 
   // The list is rendered on the server, so a Message arriving while the page is
   // open would leave its preview stale. Refreshing on delivery re-runs the
@@ -115,6 +138,7 @@ export function ConversationView({
             conversations={conversations}
             selectedId={selectedId}
             onSelect={setSelectedId}
+            onlineUserIds={onlineUserIds}
           />
         </aside>
 
@@ -134,6 +158,24 @@ export function ConversationView({
             <>
               <div className="shrink-0 px-4 py-3 shadow-[0_1px_0_0_rgb(0_0_0/0.08)] sm:px-6">
                 <h2>{selected.otherParticipant.name}</h2>
+                {/* Presence as a ~10px dot and a word, never a fill (DESIGN.md §2).
+                    Both states are shown here, unlike in the list: the header is
+                    about one person, and "whether to expect a quick reply" is
+                    exactly what the reader opened the Conversation wondering. */}
+                <p
+                  className="mt-0.5 flex items-center gap-1.5 text-[12px] leading-4 text-muted"
+                  role="status"
+                  aria-live="polite"
+                >
+                  <span
+                    className={cn(
+                      "size-2.5 rounded-full",
+                      otherOnline ? "bg-status-green" : "bg-recessed",
+                    )}
+                    aria-hidden
+                  />
+                  {otherOnline ? "Online" : "Offline"}
+                </p>
               </div>
 
               {conversation.error ? (
@@ -165,8 +207,19 @@ export function ConversationView({
                   onLoadOlder={conversation.loadOlder}
                   loadingOlder={conversation.loadingOlder}
                   reachedStart={conversation.state.reachedStart}
+                  otherLastReadSeq={live.otherLastReadSeq}
                 />
               )}
+
+              {/*
+                Sits above the composer and holds its space whether or not
+                anybody is typing, so the Conversation does not jump by the
+                indicator's height each time the other person starts a sentence.
+              */}
+              <TypingIndicator
+                name={selected.otherParticipant.name}
+                typing={live.otherTyping}
+              />
 
               {/*
                 Writable while disconnected, deliberately. The outbox records a
@@ -177,7 +230,11 @@ export function ConversationView({
                 somebody was typing.
               */}
               <div className="shrink-0 shadow-[0_-1px_0_0_rgb(0_0_0/0.08)]">
-                <Composer onSend={conversation.send} offline={status !== "connected"} />
+                <Composer
+                  onSend={conversation.send}
+                  offline={status !== "connected"}
+                  onTyping={conversation.setTyping}
+                />
               </div>
             </>
           )}

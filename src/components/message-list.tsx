@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import type { ConversationEntry } from "@/lib/conversation-state";
+import { isRead, type ConversationEntry } from "@/lib/conversation-state";
 import { cn } from "@/lib/utils";
 
 /**
@@ -56,12 +56,20 @@ export function MessageList({
   onLoadOlder,
   loadingOlder,
   reachedStart,
+  otherLastReadSeq,
 }: {
   entries: ConversationEntry[];
   viewerId: string;
   onLoadOlder: () => void;
   loadingOlder: boolean;
   reachedStart: boolean;
+  /**
+   * The other Participant's Read Mark. One number answers "has this been read"
+   * for every Message in the Conversation, because the mark is a high-water
+   * mark rather than a per-Message flag (CONTEXT.md: Read Mark) -- so a
+   * ten-thousand-Message thread costs one value rather than ten thousand.
+   */
+  otherLastReadSeq: string;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -292,6 +300,17 @@ export function MessageList({
                     : entry.pending
                       ? "Sending…"
                       : formatTime(entry.createdAt)}
+                  {/*
+                    Only on the viewer's own Messages, and only once accepted.
+                    A receipt on a received Message would be telling the reader
+                    what they themselves have read, which is not information;
+                    the sender is the one who wanted to know it landed.
+                  */}
+                  {mine && !entry.pending && !entry.failed
+                    ? isRead(entry, otherLastReadSeq)
+                      ? " · Read"
+                      : " · Sent"
+                    : null}
                 </span>
               </div>
             </div>
