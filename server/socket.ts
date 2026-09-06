@@ -8,9 +8,14 @@ import {
 import { MessageStatus } from "@prisma/client";
 import {
   ProhibitedLanguageError,
+  sendImageMessage,
   sendMessage,
   syncMessages,
 } from "../src/server/messages.js";
+import { moderateImageMessage } from "../src/server/moderation/pipeline.js";
+import { decodeToTensor } from "../src/server/moderation/decode.js";
+import { classifyImage } from "../src/server/moderation/nudity.js";
+import { isAttachableKey } from "../src/server/storage.js";
 import {
   advanceReadMark,
   correspondentsOf,
@@ -140,6 +145,51 @@ export function attachSocketServer(httpServer: HttpServer): ChatServer {
         conversationId,
         userIds: typists.filter((typist) => typist !== socketInRoom.data.userId),
       });
+    }
+  }
+
+  /**
+   * Classifies one Accepted image and announces whatever was decided.
+   *
+   * Deliberately not awaited by the send handler. The ack has already gone
+   * back, so nothing is waiting on this -- and an inference that takes an
+   * unusual amount of time must not hold a socket handler open.
+   *
+   * Who hears what is the whole of ADR-0003 in four lines. A cleared image
+   * goes to the Conversation as an ordinary `message:new`, indistinguishable
+   * from any other Message. A refused one goes only to its sender's own room,
+   * so the recipient never learns it was attempted -- and the sender's every
+   * tab learns why, not just the one that sent it.
+   */
+  async function classify(
+    messageId: string,
+    assetKey: string | null,
+    senderId: string,
+  ): Promise<void> {
+    if (assetKey === null) return;
+
+    try {
+      const decided = await moderateImageMessage({
+        messageId,
+        assetKey,
+        classify: async (image) => classifyImage(await decodeToTensor(image)),
+      });
+      const wire = toWireMessage(decided);
+
+      if (decided.status === MessageStatus.VISIBLE) {
+        io.to(conversationRoom(decided.conversationId)).emit("message:new", wire);
+      }
+      // To the sender either way: a clearance settles their pending bubble and
+      // a refusal replaces it with a reason. The recipient is told nothing
+      // about a refusal, which is what the sender-scoped room is for.
+      io.to(userRoom(senderId)).emit("message:moderated", wire);
+    } catch (error) {
+      // The pipeline turns a bad image into a REJECTED row rather than a
+      // throw, so reaching here means the database itself was unreachable.
+      // Logged rather than rethrown -- there is no caller to receive it -- and
+      // the Message stays PENDING, which is withheld from the recipient by the
+      // read model rather than delivered unexamined.
+      console.error("[socket] classifying an image failed", error);
     }
   }
 
@@ -401,6 +451,79 @@ export function attachSocketServer(httpServer: HttpServer): ChatServer {
             return;
           }
           console.error("[socket] message:send failed", error);
+          callback({ ok: false, error: "INTERNAL" });
+        });
+    });
+
+    /**
+     * Accepts an image that is already in quarantine, then classifies it.
+     *
+     * The ack returns as soon as the Message is stored PENDING, before the
+     * image has been looked at. That is ADR-0003's asynchronous path rather
+     * than a shortcut: classification costs ~50 ms on the WASM backend
+     * (ADR-0007), and holding a send's acknowledgement open for it would make
+     * every image send feel like a stall. The sender gets their Message back
+     * immediately, renders it pending, and hears the verdict separately.
+     *
+     * Nothing is broadcast here. A PENDING Message is not VISIBLE, so the gate
+     * below the text send would withhold it anyway -- but an image is the case
+     * that gate was written for, and the recipient learns of the Message only
+     * if and when it clears.
+     *
+     * The key is validated rather than trusted. A client naming a promoted key
+     * would be attaching an object that never passed the check, which is the
+     * one way the moderation requirement could be bypassed by calling the API
+     * directly.
+     */
+    socket.on("message:sendImage", (payload, callback) => {
+      if (!isAttachableKey(payload.assetKey)) {
+        callback({ ok: false, error: "INVALID_ASSET" });
+        return;
+      }
+
+      // The dimensions only reserve space in the sender's own layout, so a
+      // wrong one is a cosmetic problem rather than a security one -- but a
+      // NaN or a negative would be stored and rendered as a broken bubble.
+      const { assetWidth, assetHeight } = payload;
+      if (
+        !Number.isInteger(assetWidth) ||
+        !Number.isInteger(assetHeight) ||
+        assetWidth <= 0 ||
+        assetHeight <= 0
+      ) {
+        callback({ ok: false, error: "INVALID_ASSET" });
+        return;
+      }
+
+      sendImageMessage({
+        senderId: userId,
+        conversationId: payload.conversationId,
+        clientMessageId: payload.clientMessageId,
+        assetKey: payload.assetKey,
+        assetWidth,
+        assetHeight,
+      })
+        .then((message) => {
+          callback({ ok: true, message: toWireMessage(message) });
+
+          // A retried send returns the Message the first attempt stored, which
+          // may already have been ruled on. Re-classifying it would spend an
+          // inference to arrive at a decision the WHERE clauses in
+          // `visibleImageMessage`/`rejectImageMessage` would then refuse to
+          // apply -- so the already-decided case is simply re-announced.
+          if (message.status !== MessageStatus.PENDING) {
+            io.to(userRoom(userId)).emit("message:moderated", toWireMessage(message));
+            return;
+          }
+
+          void classify(message.id, message.assetUrl, userId);
+        })
+        .catch((error: unknown) => {
+          if (error instanceof NotAParticipantError) {
+            callback({ ok: false, error: "NOT_A_PARTICIPANT" });
+            return;
+          }
+          console.error("[socket] message:sendImage failed", error);
           callback({ ok: false, error: "INTERNAL" });
         });
     });

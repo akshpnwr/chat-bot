@@ -75,6 +75,20 @@ export interface ServerToClientEvents {
    * other side's indicator flicker.
    */
   "presence:changed": (payload: PresencePayload) => void;
+  /**
+   * An image this User sent has been classified.
+   *
+   * Sent to the *sender's* own room rather than to the Conversation, because
+   * it is the one outcome the recipient must never learn about. A cleared
+   * image reaches the recipient as an ordinary `message:new`; a refused one
+   * reaches nobody, and this is what tells its sender why -- so the spinner
+   * they have been watching resolves into a reason rather than hanging.
+   *
+   * It carries the whole Message rather than a verdict flag: a cleared image's
+   * `assetUrl` has moved out of quarantine and its status has changed, and the
+   * sender's other tabs need both.
+   */
+  "message:moderated": (message: WireMessage) => void;
 }
 
 /**
@@ -82,7 +96,12 @@ export interface ServerToClientEvents {
  * failures a client has to handle are visible in the type instead of being
  * discovered from the server's source.
  */
-export type SendError = "NOT_A_PARTICIPANT" | "PROHIBITED_LANGUAGE" | "INTERNAL";
+export type SendError =
+  | "NOT_A_PARTICIPANT"
+  | "PROHIBITED_LANGUAGE"
+  /** The named object is not one this sender may attach -- see `message:sendImage`. */
+  | "INVALID_ASSET"
+  | "INTERNAL";
 
 /** The reply to a sync: the Messages missed, or why the gap could not be read. */
 export type SyncReply =
@@ -210,6 +229,36 @@ export interface ClientToServerEvents {
    */
   "message:send": (
     payload: { conversationId: string; clientMessageId: string; body: string },
+    callback: (reply: SendReply) => void,
+  ) => void;
+  /**
+   * Send an image that has already been uploaded to quarantine.
+   *
+   * Two round trips rather than one, and the split is the design. The bytes go
+   * straight from the browser to object storage under a presigned URL, so they
+   * never pass through the application server; what crosses this socket is
+   * only the key they landed under, plus the dimensions the browser measured.
+   *
+   * The ack returns as soon as the Message is Accepted at PENDING -- it is not
+   * held open for classification, which costs ~50 ms on the WASM backend
+   * (ADR-0007). The verdict follows separately as `message:moderated`, and the
+   * recipient hears nothing at all until and unless it clears.
+   *
+   * `assetKey` is checked rather than trusted. It is a key this server issued,
+   * under the quarantine prefix, and a client naming anything else -- an
+   * object in `attachments/`, or somebody else's upload -- is refused, since
+   * otherwise a caller could attach an object that never passed the check.
+   */
+  "message:sendImage": (
+    payload: {
+      conversationId: string;
+      clientMessageId: string;
+      /** The quarantine key returned by the upload route. */
+      assetKey: string;
+      /** Measured in the browser, so the bubble can reserve its space. */
+      assetWidth: number;
+      assetHeight: number;
+    },
     callback: (reply: SendReply) => void,
   ) => void;
 }

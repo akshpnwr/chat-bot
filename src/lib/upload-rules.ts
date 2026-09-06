@@ -8,8 +8,14 @@
  * up. They are not a substitute for classification, which is the expensive
  * check and runs on the content itself.
  *
- * Pure, like the profanity pipeline (ADR-0004) and the nudity rule beside it,
- * so the limits are stated in tests rather than discovered from a 413.
+ * Pure, like the profanity pipeline (ADR-0004) and the nudity rule, so the
+ * limits are stated in tests rather than discovered from a 413.
+ *
+ * Lives here rather than under `src/server/` because both sides need it: the
+ * upload route enforces these limits, and the composer applies the same ones
+ * to give an instant refusal without a round trip. Server-only modules reach
+ * for credentials and Prisma, and this one must be safe in a browser bundle.
+ * The client copy is a courtesy -- the server's check is the one that counts.
  */
 
 /**

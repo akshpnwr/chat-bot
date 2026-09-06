@@ -3,6 +3,7 @@ import {
   applyAccepted,
   applyOlderPage,
   applyPending,
+  applyPendingImage,
   emptyConversation,
   isRead,
   type ConversationState,
@@ -266,5 +267,146 @@ describe("isRead", () => {
 
   it("reports nothing as read against a Read Mark of zero", () => {
     expect(isRead(wire("1"), "0")).toBe(false);
+  });
+});
+
+/**
+ * Images in the Conversation value.
+ *
+ * An image differs from text in three ways the state layer has to carry: it
+ * has no body to render, it has intrinsic dimensions the list reserves space
+ * from before the bytes arrive, and it can sit PENDING after being Accepted --
+ * which text never does, because text moderation is synchronous.
+ */
+describe("an image Message", () => {
+  it("carries its dimensions and kind through into the entry", () => {
+    const state = applyAccepted(
+      emptyConversation(),
+      wire("1", {
+        kind: "IMAGE",
+        body: null,
+        assetUrl: "attachments/k",
+        assetWidth: 800,
+        assetHeight: 600,
+      }),
+    );
+
+    const entry = state.entries[0];
+    expect(entry?.kind).toBe("IMAGE");
+    expect(entry?.assetWidth).toBe(800);
+    expect(entry?.assetHeight).toBe(600);
+  });
+
+  /**
+   * The distinction the sender's spinner is drawn from. A PENDING image has
+   * been Accepted -- it has a Sequence -- but has not been classified, so it
+   * is neither "sending" nor delivered.
+   */
+  it("is marked as awaiting moderation while PENDING, though it has a Sequence", () => {
+    const state = applyAccepted(
+      emptyConversation(),
+      wire("1", { kind: "IMAGE", body: null, status: "PENDING" }),
+    );
+
+    const entry = state.entries[0];
+    expect(entry?.seq).toBe("1");
+    expect(entry?.pending).toBe(false);
+    expect(entry?.awaitingModeration).toBe(true);
+  });
+
+  it("stops awaiting moderation once it is cleared", () => {
+    const pending = applyAccepted(
+      emptyConversation(),
+      wire("1", { kind: "IMAGE", body: null, status: "PENDING" }),
+    );
+    const cleared = applyAccepted(
+      pending,
+      wire("1", {
+        kind: "IMAGE",
+        body: null,
+        status: "VISIBLE",
+        assetUrl: "attachments/k",
+      }),
+    );
+
+    expect(cleared.entries).toHaveLength(1);
+    expect(cleared.entries[0]?.awaitingModeration).toBe(false);
+  });
+
+  /**
+   * A refused image stays where it was written, showing why. It is not removed:
+   * the sender watched it go, and a bubble that simply vanished would leave
+   * them with no account of what happened to it.
+   */
+  it("becomes a failure carrying the moderation reason when refused", () => {
+    const pending = applyAccepted(
+      emptyConversation(),
+      wire("1", { kind: "IMAGE", body: null, status: "PENDING" }),
+    );
+    const refused = applyAccepted(
+      pending,
+      wire("1", {
+        kind: "IMAGE",
+        body: null,
+        status: "REJECTED",
+        assetUrl: null,
+        moderationReason: "This image appears to contain explicit content",
+      }),
+    );
+
+    expect(refused.entries).toHaveLength(1);
+    const entry = refused.entries[0];
+    expect(entry?.failed).toBe(true);
+    expect(entry?.failureReason).toBe(
+      "This image appears to contain explicit content",
+    );
+    expect(entry?.awaitingModeration).toBe(false);
+  });
+
+  /**
+   * The optimistic entry a sender sees between choosing an image and the
+   * server accepting it. It holds a local object URL so the sender sees their
+   * own picture immediately rather than a grey box.
+   */
+  it("can be rendered pending from a local preview before it is Accepted", () => {
+    const state = applyPendingImage(emptyConversation(), {
+      clientMessageId: "client-1",
+      senderId: "ada",
+      previewUrl: "blob:local-preview",
+      assetWidth: 800,
+      assetHeight: 600,
+      createdAt: "2026-09-05T10:00:00.000Z",
+    });
+
+    const entry = state.entries[0];
+    expect(entry?.kind).toBe("IMAGE");
+    expect(entry?.pending).toBe(true);
+    expect(entry?.seq).toBeNull();
+    expect(entry?.previewUrl).toBe("blob:local-preview");
+    expect(entry?.assetWidth).toBe(800);
+  });
+
+  /**
+   * The same rule `applyPending` follows for text: a Message the Conversation
+   * already holds is left alone, so a retry cannot drag an Accepted image back
+   * into "Sending…".
+   */
+  it("leaves an Accepted image alone when the pending entry is reapplied", () => {
+    const accepted = applyAccepted(
+      emptyConversation(),
+      wire("1", { kind: "IMAGE", body: null, clientMessageId: "client-1" }),
+    );
+    const retried = applyPendingImage(accepted, {
+      clientMessageId: "client-1",
+      senderId: "ada",
+      previewUrl: "blob:local-preview",
+      assetWidth: 800,
+      assetHeight: 600,
+      createdAt: "2026-09-05T10:00:00.000Z",
+    });
+
+    expect(retried.entries).toHaveLength(1);
+    expect(retried.entries[0]?.seq).toBe("1");
+    expect(retried.entries[0]?.pending).toBe(false);
   });
 });

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
+  CopyObjectCommand,
   DeleteObjectCommand,
   GetObjectCommand,
   PutObjectCommand,
@@ -172,11 +173,16 @@ export async function promote(key: string): Promise<string> {
   const { client, bucket } = storage();
   const destination = promotedKey(key);
 
+  // Server-side: the bucket copies the object itself and the bytes never
+  // enter this process. Reading them in to write them back would put an
+  // 8 MB image in a 512 MB process (ADR-0001) that already holds the 121 MB
+  // classifier -- the same cost the presigned upload above exists to avoid,
+  // paid on the way out instead of the way in.
   await client.send(
-    new PutObjectCommand({
+    new CopyObjectCommand({
       Bucket: bucket,
       Key: destination,
-      Body: await readObject(key),
+      CopySource: `${bucket}/${key}`,
     }),
   );
 
@@ -199,4 +205,34 @@ export async function promote(key: string): Promise<string> {
 export async function discard(key: string): Promise<void> {
   const { client, bucket } = storage();
   await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
+}
+
+/**
+ * Whether a key a client named is one it may attach to a Message.
+ *
+ * A client tells the server which object to attach, and that string cannot be
+ * taken at face value. Two things are checked, and each closes a different
+ * hole:
+ *
+ *  - It must sit under the quarantine prefix. A caller naming an
+ *    `attachments/` key would be attaching an object that is already promoted,
+ *    which is to say one that skips classification entirely -- the exact
+ *    bypass the quarantine/promote split exists to make impossible.
+ *  - The rest must be a bare UUID, as `quarantineKey` generates. Anything else
+ *    is either a traversal attempt (`quarantine/../attachments/x`) or a key
+ *    this server never issued.
+ *
+ * What this cannot check is *whose* upload it was: the presigned URL is issued
+ * without recording who asked for it. That is acceptable because the key is a
+ * random v4 UUID handed back over an authenticated response -- guessing one is
+ * not a realistic attack, and the worst an attacker who somehow held another
+ * user's key could do is attach an image to their own Conversation, where it
+ * is classified like any other.
+ */
+const QUARANTINE_KEY_PATTERN = new RegExp(
+  `^${QUARANTINE_PREFIX}[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`,
+);
+
+export function isAttachableKey(key: string): boolean {
+  return QUARANTINE_KEY_PATTERN.test(key);
 }

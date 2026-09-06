@@ -23,6 +23,22 @@ export interface OutboxEntry {
   conversationId: string;
   body: string;
   createdAt: string;
+  /**
+   * Set on an image send, naming the quarantined object the retry should
+   * attach.
+   *
+   * Only the key is kept, never the bytes. The image is already in object
+   * storage by the time an entry is written -- the upload happens before the
+   * send -- so a retry has something durable to point at without this browser
+   * holding a copy. Putting an 8 MB image in `localStorage` would exhaust a
+   * 5 MB quota with a single photograph and take every other Conversation's
+   * outbox down with it.
+   */
+  image?: {
+    assetKey: string;
+    assetWidth: number;
+    assetHeight: number;
+  };
 }
 
 /**
@@ -45,15 +61,31 @@ function keyFor(conversationId: string): string {
   return `chat.outbox.${conversationId}`;
 }
 
+function isImage(value: unknown): value is NonNullable<OutboxEntry["image"]> {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Partial<NonNullable<OutboxEntry["image"]>>;
+  return (
+    typeof candidate.assetKey === "string" &&
+    typeof candidate.assetWidth === "number" &&
+    typeof candidate.assetHeight === "number"
+  );
+}
+
 function isEntry(value: unknown): value is OutboxEntry {
   if (typeof value !== "object" || value === null) return false;
   const candidate = value as Partial<OutboxEntry>;
-  return (
-    typeof candidate.clientMessageId === "string" &&
-    typeof candidate.conversationId === "string" &&
-    typeof candidate.body === "string" &&
-    typeof candidate.createdAt === "string"
-  );
+  if (
+    typeof candidate.clientMessageId !== "string" ||
+    typeof candidate.conversationId !== "string" ||
+    typeof candidate.body !== "string" ||
+    typeof candidate.createdAt !== "string"
+  ) {
+    return false;
+  }
+  // An image entry is only usable if its whole descriptor survived. A
+  // half-written one would be retried as a text Message with an empty body,
+  // which is a worse outcome than dropping it.
+  return candidate.image === undefined || isImage(candidate.image);
 }
 
 /**

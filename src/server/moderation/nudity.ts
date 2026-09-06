@@ -52,12 +52,30 @@ function useLocalWasmBinaries(): void {
  */
 let loading: Promise<nsfw.NSFWJS> | null = null;
 
+/**
+ * The WASM backend, brought up once and awaited by everything that touches a
+ * tensor.
+ *
+ * Held apart from the model below because the two are needed at different
+ * moments. A tensor is *constructed* before it is classified -- the decoder
+ * builds one from the uploaded pixels -- and `tf.tensor3d` throws outright if
+ * the highest-priority backend has not been initialised. Folding this into
+ * `model()` alone would mean the backend came up only when the model was asked
+ * for, which is one step too late for the caller that made the tensor.
+ */
+let backend: Promise<void> | null = null;
+
+export function nudityBackendReady(): Promise<void> {
+  if (backend === null) {
+    useLocalWasmBinaries();
+    backend = tf.setBackend("wasm").then(() => tf.ready());
+  }
+  return backend;
+}
+
 function model(): Promise<nsfw.NSFWJS> {
   if (loading === null) {
-    useLocalWasmBinaries();
-    loading = tf
-      .setBackend("wasm")
-      .then(() => tf.ready())
+    loading = nudityBackendReady()
       // No argument: nsfwjs 4.4.0 carries MobileNetV2's weights in the package
       // itself and loads them from memory, so this too involves no network.
       .then(() => nsfw.load());

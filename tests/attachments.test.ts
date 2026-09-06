@@ -3,7 +3,12 @@ import {
   MAX_UPLOAD_BYTES,
   isAllowedImageType,
   validateUploadRequest,
-} from "@/server/moderation/upload-rules";
+} from "@/lib/upload-rules";
+import {
+  ATTACHMENT_PREFIX,
+  isAttachableKey,
+  quarantineKey,
+} from "@/server/storage";
 
 /**
  * What is allowed to be uploaded at all, decided before a byte is stored.
@@ -90,5 +95,44 @@ describe("validateUploadRequest", () => {
       const result = validateUploadRequest({ contentType: "image/png", contentLength });
       expect(result.ok).toBe(false);
     }
+  });
+});
+
+/**
+ * The key a client names when it sends an image, which is the one part of an
+ * upload the server takes from the client rather than generating.
+ */
+describe("isAttachableKey", () => {
+  it("accepts a key of the shape the upload route issues", () => {
+    expect(isAttachableKey(quarantineKey())).toBe(true);
+  });
+
+  /**
+   * The bypass this rule exists for. A promoted key is an object that has
+   * already cleared moderation; letting a client name one would let it attach
+   * an image nobody classified.
+   */
+  it("refuses a promoted key, which would skip classification entirely", () => {
+    expect(
+      isAttachableKey(`${ATTACHMENT_PREFIX}0e5f3a51-1c2e-4b70-9d3a-7c4e5f6a8b90`),
+    ).toBe(false);
+  });
+
+  it("refuses traversal out of the quarantine prefix", () => {
+    expect(
+      isAttachableKey("quarantine/../attachments/0e5f3a51-1c2e-4b70-9d3a-7c4e5f6a8b90"),
+    ).toBe(false);
+  });
+
+  it("refuses a key that is not a UUID, which this server never issued", () => {
+    expect(isAttachableKey("quarantine/not-a-uuid")).toBe(false);
+    expect(isAttachableKey("quarantine/")).toBe(false);
+    expect(isAttachableKey("")).toBe(false);
+  });
+
+  it("refuses a key with anything appended to a valid one", () => {
+    expect(
+      isAttachableKey("quarantine/0e5f3a51-1c2e-4b70-9d3a-7c4e5f6a8b90/../evil"),
+    ).toBe(false);
   });
 });

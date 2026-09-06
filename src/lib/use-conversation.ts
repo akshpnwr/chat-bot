@@ -6,6 +6,7 @@ import {
   applyAccepted,
   applyOlderPage,
   applyPending,
+  applyPendingImage,
   applyRetrying,
   applySyncGap,
   emptyConversation,
@@ -25,8 +26,14 @@ import {
   TYPING_IDLE_MS,
   type TypingAnnouncer,
 } from "./typing-announcer";
+import {
+  ImageRejectedError,
+  measureImage,
+  refuseUnsendableImage,
+  uploadToQuarantine,
+} from "./image-upload";
 import { isAfter, maxSequence, type Sequence } from "./sequence";
-import type { SyncReply } from "./socket-events";
+import type { SendReply, SyncReply } from "./socket-events";
 import type { WireMessage, WireMessagePage } from "./wire";
 
 /** How many Messages a page of history holds. */
@@ -70,6 +77,12 @@ export interface OpenConversation {
   syncing: boolean;
   error: string | null;
   send: (body: string) => void;
+  /**
+   * Uploads an image and sends it. Resolves once the send has been attempted,
+   * which is not the same as the image having been cleared -- the verdict
+   * arrives later over `message:moderated`.
+   */
+  sendImage: (file: File) => Promise<void>;
   loadOlder: () => void;
   /**
    * Announces that the reader is composing, or has stopped. Throttled inside
@@ -252,14 +265,11 @@ export function useConversation(
    * outlasts the socket does not cost the sender their Message.
    */
   const emitSend = useCallback((activeSocket: ChatSocket, entry: OutboxEntry) => {
-    activeSocket.emit(
-      "message:send",
-      {
-        conversationId: entry.conversationId,
-        clientMessageId: entry.clientMessageId,
-        body: entry.body,
-      },
-      (reply) => {
+    // One settle path for both kinds. The two events differ only in what they
+    // carry -- a body or a key -- and every outcome after the ack is identical,
+    // so branching here rather than duplicating the reply handling is what
+    // keeps an image send and a text send from drifting apart.
+    const onReply = (reply: SendReply) => {
         const store = outboxRef.current;
 
         if (reply.ok) {
@@ -274,7 +284,11 @@ export function useConversation(
         // going back on the wire at every reconnection for the rest of the
         // session. Only a transport or server failure is worth retrying.
         const permanent =
-          reply.error === "NOT_A_PARTICIPANT" || reply.error === "PROHIBITED_LANGUAGE";
+          reply.error === "NOT_A_PARTICIPANT" ||
+          reply.error === "PROHIBITED_LANGUAGE" ||
+          // A key the server refuses is refused for what it is, not for when
+          // it was sent, so asking again changes nothing.
+          reply.error === "INVALID_ASSET";
         if (permanent && store) {
           settleSend(store, entry.conversationId, entry.clientMessageId);
         }
@@ -286,7 +300,9 @@ export function useConversation(
         const failureReason =
           reply.error === "PROHIBITED_LANGUAGE" && reply.term !== undefined
             ? `Not sent: "${reply.term}" is not allowed`
-            : undefined;
+            : reply.error === "INVALID_ASSET"
+              ? "Not sent: this image could not be attached"
+              : undefined;
 
         setState((current) => ({
           ...current,
@@ -296,7 +312,31 @@ export function useConversation(
               : held,
           ),
         }));
+    };
+
+    if (entry.image) {
+      activeSocket.emit(
+        "message:sendImage",
+        {
+          conversationId: entry.conversationId,
+          clientMessageId: entry.clientMessageId,
+          assetKey: entry.image.assetKey,
+          assetWidth: entry.image.assetWidth,
+          assetHeight: entry.image.assetHeight,
+        },
+        onReply,
+      );
+      return;
+    }
+
+    activeSocket.emit(
+      "message:send",
+      {
+        conversationId: entry.conversationId,
+        clientMessageId: entry.clientMessageId,
+        body: entry.body,
       },
+      onReply,
     );
   }, []);
 
@@ -428,20 +468,36 @@ export function useConversation(
         // Rendered as pending again: a Message retried after a reload has no
         // entry in this page's state yet, and the sender should see it waiting
         // rather than see it reappear only once it is accepted.
-        setState((current) =>
-          applyRetrying(
-            applyPending(current, {
-              clientMessageId: pending.clientMessageId,
-              senderId: viewerId,
-              body: pending.body,
-              createdAt: pending.createdAt,
-            }),
-            // A Message this page already holds is left untouched by
-            // `applyPending`, so an earlier failure would still be showing "Not
-            // delivered" while the retry below puts it back on the wire.
-            pending.clientMessageId,
-          ),
-        );
+        setState((current) => {
+          // An image retried after a reload has no preview to show. The object
+          // URL it was rendered from belonged to the page that created it and
+          // died with it, and the image is not readable from the server either
+          // -- it sits in quarantine, unclassified, with no Message id to ask
+          // for it by. So the bubble reserves its space from the dimensions the
+          // outbox kept and shows nothing inside, which is honest: the sender
+          // is being told this image is still on its way, not shown a picture
+          // that is not there.
+          const rendered = pending.image
+            ? applyPendingImage(current, {
+                clientMessageId: pending.clientMessageId,
+                senderId: viewerId,
+                previewUrl: "",
+                assetWidth: pending.image.assetWidth,
+                assetHeight: pending.image.assetHeight,
+                createdAt: pending.createdAt,
+              })
+            : applyPending(current, {
+                clientMessageId: pending.clientMessageId,
+                senderId: viewerId,
+                body: pending.body,
+                createdAt: pending.createdAt,
+              });
+
+          // A Message this page already holds is left untouched by
+          // `applyPending`, so an earlier failure would still be showing "Not
+          // delivered" while the retry below puts it back on the wire.
+          return applyRetrying(rendered, pending.clientMessageId);
+        });
         emitSend(socket, pending);
       }
     };
@@ -491,9 +547,33 @@ export function useConversation(
       setState((current) => applyAccepted(current, message));
     };
 
+    /**
+     * The verdict on an image this browser's user sent.
+     *
+     * Folded in exactly as an accepted Message is, because that is what it is:
+     * the same Message at a later status. A clearance replaces the pending
+     * bubble with the delivered one; a refusal replaces it with the reason,
+     * which `toEntry` derives from the REJECTED status rather than this
+     * listener deciding it a second way.
+     *
+     * It settles the outbox too. The send was Accepted when the ack returned,
+     * so ordinarily nothing is left owing -- but a tab that was reloaded
+     * between the ack and the verdict rebuilt its outbox entry from storage,
+     * and this is what clears it rather than leaving a retry queued behind a
+     * Message the server has already ruled on.
+     */
+    const onModerated = (message: WireMessage) => {
+      if (message.conversationId !== conversationId) return;
+      const store = outboxRef.current;
+      if (store) settleSend(store, conversationId, message.clientMessageId);
+      setState((current) => applyAccepted(current, message));
+    };
+
     socket.on("message:new", onMessage);
+    socket.on("message:moderated", onModerated);
     return () => {
       socket.off("message:new", onMessage);
+      socket.off("message:moderated", onModerated);
     };
   }, [socket, conversationId]);
 
@@ -549,6 +629,122 @@ export function useConversation(
       // itself has already arrived, and an indicator still claiming the sender
       // is typing contradicts what the recipient can see.
       announcerRef.current?.stop();
+    },
+    [socket, conversationId, viewerId, emitSend],
+  );
+
+  /**
+   * Uploads an image and sends it.
+   *
+   * The order is deliberate and is not the order text follows. Text is
+   * recorded durably and rendered optimistically before anything touches the
+   * network, because the Message *is* the text -- there is nothing else to
+   * wait for. An image cannot work that way: the outbox holds a storage key,
+   * and there is no key until the upload has finished. So the bytes go up
+   * first, and only then is the send recorded and put on the wire.
+   *
+   * What the sender sees does not wait for any of it. The bubble is rendered
+   * from a local object URL the moment they pick the file, at the size their
+   * browser measured, so the picture and its final layout are on screen while
+   * the upload is still running.
+   *
+   * The consequence of that order is that an image chosen while offline is
+   * refused rather than queued, and told so. A text Message written offline is
+   * kept and retried; an image cannot be, because keeping it would mean
+   * holding megabytes of file in `localStorage` -- which a single photograph
+   * would overflow, taking every other Conversation's outbox down with it.
+   * Saying so is better than appearing to accept it and losing it on reload.
+   */
+  const sendImage = useCallback(
+    async (file: File) => {
+      if (!conversationId) return;
+
+      const clientMessageId = crypto.randomUUID();
+      const createdAt = new Date().toISOString();
+
+      // Held outside the try so the failure path can release it: an object URL
+      // is a reference the browser keeps until it is revoked, and one leaked
+      // per failed send would pin those files for the life of the page.
+      let previewUrl: string | null = null;
+
+      try {
+        refuseUnsendableImage(file);
+        const { width, height } = await measureImage(file);
+
+        const preview = URL.createObjectURL(file);
+        previewUrl = preview;
+        setState((current) =>
+          applyPendingImage(current, {
+            clientMessageId,
+            senderId: viewerId,
+            previewUrl: preview,
+            assetWidth: width,
+            assetHeight: height,
+            createdAt,
+          }),
+        );
+
+        const assetKey = await uploadToQuarantine(conversationId, file);
+
+        const entry: OutboxEntry = {
+          clientMessageId,
+          conversationId,
+          // An image has no body. The field is kept as an empty string rather
+          // than made optional so one outbox shape serves both kinds.
+          body: "",
+          createdAt,
+          image: { assetKey, assetWidth: width, assetHeight: height },
+        };
+
+        // Recorded only now, because only now is there a key to record. The
+        // window this leaves -- an object uploaded whose send was never
+        // recorded -- costs a stray quarantine object rather than a lost
+        // Message, and an unreferenced quarantine object is never promoted and
+        // never delivered.
+        const store = outboxRef.current;
+        if (store) recordSend(store, entry);
+
+        if (socket?.connected) {
+          emitSend(socket, entry);
+        } else {
+          // Nothing will retry this: an image send needs its upload, and the
+          // reconnection path replays the outbox rather than re-uploading. The
+          // entry is dropped so it cannot be replayed against a key whose
+          // object may have been swept, and the sender is told plainly.
+          if (store) settleSend(store, conversationId, clientMessageId);
+          throw new ImageRejectedError(
+            "Images cannot be sent while offline. Try again once reconnected.",
+          );
+        }
+      } catch (cause) {
+        if (previewUrl) URL.revokeObjectURL(previewUrl);
+
+        const reason =
+          cause instanceof ImageRejectedError
+            ? cause.message
+            : "That image could not be sent.";
+        if (!(cause instanceof ImageRejectedError)) {
+          console.error("[conversation] sending an image failed", cause);
+        }
+
+        // The bubble stays and carries the reason, rather than disappearing.
+        // The sender chose a file and watched it appear; removing it silently
+        // would leave them unsure whether it went.
+        setState((current) => ({
+          ...current,
+          entries: current.entries.map((held) =>
+            held.clientMessageId === clientMessageId
+              ? {
+                  ...held,
+                  pending: false,
+                  failed: true,
+                  failureReason: reason,
+                  previewUrl: undefined,
+                }
+              : held,
+          ),
+        }));
+      }
     },
     [socket, conversationId, viewerId, emitSend],
   );
@@ -627,5 +823,15 @@ export function useConversation(
     else announcerRef.current?.stop();
   }, []);
 
-  return { state, loading, loadingOlder, syncing, error, send, loadOlder, setTyping };
+  return {
+    state,
+    loading,
+    loadingOlder,
+    syncing,
+    error,
+    send,
+    sendImage,
+    loadOlder,
+    setTyping,
+  };
 }

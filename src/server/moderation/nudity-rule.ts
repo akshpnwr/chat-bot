@@ -30,10 +30,11 @@ export interface Classification {
 /**
  * Where the two explicit classes, taken together, become a refusal.
  *
- * Together rather than separately: `Porn` and `Sexy` are the model's
+ * Together rather than separately: `Porn` and `Hentai` are the model's
  * photographic and drawn readings of the same thing, and an image it splits
  * 0.4/0.4 between them is 80% explicit by its own reckoning while clearing any
- * per-class bar of 0.6.
+ * per-class bar of 0.6. `Sexy` is a different question and has its own,
+ * much higher bar below.
  */
 export const EXPLICIT_THRESHOLD = 0.6;
 

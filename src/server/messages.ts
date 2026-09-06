@@ -1,6 +1,6 @@
 import { MessageKind, MessageStatus, Prisma, type Message } from "@prisma/client";
 import { prisma } from "@/lib/db";
-import { assertParticipant } from "@/server/authorization";
+import { assertParticipant, NotAParticipantError } from "@/server/authorization";
 import { screen } from "@/server/moderation/profanity";
 
 /** Postgres' unique-violation code, raised by the idempotency constraint. */
@@ -389,4 +389,51 @@ export async function rejectImageMessage({
   const existing = await prisma.message.findUnique({ where: { id: messageId } });
   if (!existing) throw new Error(`No such Message: ${messageId}`);
   return existing;
+}
+
+/**
+ * The storage key a User is allowed to read for one image Message.
+ *
+ * This exists because a presigned GET is a real capability against the bucket,
+ * and handing one out is a read of the Conversation just as much as loading a
+ * page of history is. Deciding it here rather than in the route means the
+ * asset path is governed by the same rule as every other read route
+ * (ADR-0003), rather than by a second rule written beside it that could drift.
+ *
+ * The rule is `readMessages`' rule narrowed to a single Message: VISIBLE to
+ * anybody in the Conversation, and the sender's own Messages at any status --
+ * which is what lets a sender see the image they just sent while it is still
+ * being classified. A REJECTED Message satisfies neither for the recipient,
+ * and for the sender it has had its key cleared, so there is nothing to give
+ * out in either case.
+ *
+ * Every refusal is the same `NotAParticipantError`, whatever the actual cause:
+ * a Message that does not exist, one in somebody else's Conversation, and one
+ * that failed moderation are indistinguishable from outside. Distinguishing
+ * them would turn this route into an oracle for which Message ids exist and
+ * which images were refused.
+ */
+export async function readableAsset({
+  userId,
+  messageId,
+}: {
+  userId: string;
+  messageId: string;
+}): Promise<string> {
+  const message = await prisma.message.findUnique({ where: { id: messageId } });
+  if (!message || message.assetUrl === null) {
+    throw new NotAParticipantError(userId, "unknown");
+  }
+
+  // Membership first, so a stranger learns nothing about the Message beyond
+  // the refusal they would have received anyway.
+  await assertParticipant(userId, message.conversationId);
+
+  const readable =
+    message.status === MessageStatus.VISIBLE || message.senderId === userId;
+  if (!readable) {
+    throw new NotAParticipantError(userId, message.conversationId);
+  }
+
+  return message.assetUrl;
 }
