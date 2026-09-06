@@ -8,7 +8,19 @@ import next from "next";
 
 const dev = process.env.NODE_ENV !== "production";
 const port = Number(process.env.PORT ?? 3000);
-const hostname = process.env.HOSTNAME ?? "0.0.0.0";
+/**
+ * The interface to bind, which is every interface unless told otherwise.
+ *
+ * Deliberately not read from `HOSTNAME`. Render -- and Docker generally --
+ * sets that to the container's own name (`srv-xxxx`), which is not an address
+ * this process can bind: `listen` resolves it, gets ENOTFOUND, and the server
+ * dies before it can serve anything, which the platform then reports as a 502
+ * rather than as a crash. A deployment variable named for the host is the
+ * wrong thing to trust for a bind address.
+ *
+ * `BIND_HOST` is the override, because it is ours and nothing else sets it.
+ */
+const hostname = process.env.BIND_HOST ?? "0.0.0.0";
 
 /**
  * One HTTP server, two responsibilities: Next.js handles requests, Socket.IO
