@@ -28,7 +28,11 @@ export interface ConversationEntry {
   createdAt: string;
   /** True until the server has Accepted this Message. */
   pending: boolean;
-  /** TEXT or IMAGE. An image has no body and is rendered from its asset. */
+  /**
+   * What the Message is. Everything but TEXT is rendered from its asset rather
+   * than its body -- and for those kinds `body` carries alt text (a GIF's
+   * description, a sticker's label) rather than anything the sender wrote.
+   */
   kind: MessageKind;
   /**
    * True while an Accepted image is being classified.
@@ -46,6 +50,17 @@ export interface ConversationEntry {
    * to anyone else and is never sent anywhere.
    */
   previewUrl?: string;
+  /**
+   * Where a GIF or sticker is fetched from.
+   *
+   * Only these two kinds carry it. An uploaded image deliberately does not:
+   * its object is private, so it is fetched through an authorized route by
+   * Message id (ADR-0003) rather than from a url the client was handed. A GIF
+   * and a sticker have nothing to withhold -- one is public at the provider,
+   * the other ships with the application -- so the url is the asset itself and
+   * the sender can render it before the server has answered.
+   */
+  assetUrl?: string | null;
   /**
    * Intrinsic dimensions, carried so the bubble can reserve exactly the space
    * the image will occupy before a byte of it has loaded. This is what keeps
@@ -111,6 +126,16 @@ function toEntry(message: WireMessage): ConversationEntry {
     failureReason: refused ? (message.moderationReason ?? undefined) : undefined,
     assetWidth: message.assetWidth,
     assetHeight: message.assetHeight,
+    // Only for the kinds that render from it. An IMAGE's `assetUrl` is a
+    // storage key in a private bucket, not something a bubble can fetch, and
+    // carrying it into client state would put the object's name in the page
+    // for no one to use -- the image is fetched by Message id through the
+    // authorized route instead, so the read model rules on it each time
+    // (ADR-0003).
+    assetUrl:
+      message.kind === "GIF" || message.kind === "STICKER"
+        ? message.assetUrl
+        : null,
   };
 }
 
@@ -220,6 +245,64 @@ export function applyPendingImage(
     previewUrl: image.previewUrl,
     assetWidth: image.assetWidth,
     assetHeight: image.assetHeight,
+  };
+  return { ...state, entries: [...state.entries, entry].sort(byPosition) };
+}
+
+/**
+ * Renders a GIF or a sticker the sender has just picked, before the server has
+ * Accepted it.
+ *
+ * Simpler than the image case, and the difference is the whole reason it is a
+ * separate function rather than a parameter on that one. An image has to be
+ * uploaded, so its optimistic bubble shows a local object URL that only this
+ * tab can resolve and that has to be swapped for an authorized route later.
+ * Neither of these has anything to upload: a GIF is already at the provider
+ * and a sticker already ships with the application, so the entry carries the
+ * real url from the first frame -- the sender's bubble and the recipient's are
+ * the same picture, and acceptance changes only the Sequence.
+ *
+ * The dimensions are likewise known before the send rather than measured, so
+ * the bubble occupies its final space immediately and the thread does not
+ * reflow when the asset loads.
+ *
+ * A Message the Conversation already holds is left exactly as it is, for the
+ * reason `applyPending` gives: the retry path re-renders every unacknowledged
+ * send, and an Accepted Message must not be dragged back into "Sending...".
+ */
+export function applyPendingAsset(
+  state: ConversationState,
+  asset: {
+    clientMessageId: string;
+    senderId: string;
+    /** GIF or STICKER. Images take `applyPendingImage` instead. */
+    kind: Extract<MessageKind, "GIF" | "STICKER">;
+    /** Public for a GIF, bundled for a sticker; either way, fetchable now. */
+    assetUrl: string;
+    /** The description or label, rendered as the bubble's alt text. */
+    body: string;
+    assetWidth: number;
+    assetHeight: number;
+    createdAt: string;
+  },
+): ConversationState {
+  const held = state.entries.some(
+    (entry) => entry.clientMessageId === asset.clientMessageId,
+  );
+  if (held) return state;
+
+  const entry: ConversationEntry = {
+    seq: null,
+    id: null,
+    clientMessageId: asset.clientMessageId,
+    senderId: asset.senderId,
+    body: asset.body,
+    createdAt: asset.createdAt,
+    pending: true,
+    kind: asset.kind,
+    assetUrl: asset.assetUrl,
+    assetWidth: asset.assetWidth,
+    assetHeight: asset.assetHeight,
   };
   return { ...state, entries: [...state.entries, entry].sort(byPosition) };
 }

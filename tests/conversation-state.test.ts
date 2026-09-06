@@ -3,6 +3,7 @@ import {
   applyAccepted,
   applyOlderPage,
   applyPending,
+  applyPendingAsset,
   applyPendingImage,
   emptyConversation,
   isRead,
@@ -408,5 +409,191 @@ describe("an image Message", () => {
     expect(retried.entries).toHaveLength(1);
     expect(retried.entries[0]?.seq).toBe("1");
     expect(retried.entries[0]?.pending).toBe(false);
+  });
+});
+
+describe("applyPendingAsset", () => {
+  /**
+   * The optimistic entry for a GIF or a sticker.
+   *
+   * Unlike an image, it carries the real url from the first frame rather than a
+   * local object URL. There is nothing to upload -- the asset already exists at
+   * a url both Participants can reach -- so the sender's bubble and the
+   * recipient's are the same picture, and settling the send changes only the
+   * Sequence.
+   */
+  it("renders a GIF the sender picked, before the server has answered", () => {
+    const state = applyPendingAsset(emptyConversation(), {
+      clientMessageId: "client-gif",
+      senderId: "ada",
+      kind: "GIF",
+      assetUrl: "https://media.tenor.com/abc/full.gif",
+      body: "a dancing cat",
+      assetWidth: 498,
+      assetHeight: 362,
+      createdAt: "2026-09-05T10:00:00.000Z",
+    });
+
+    const entry = state.entries[0];
+    expect(entry?.kind).toBe("GIF");
+    expect(entry?.pending).toBe(true);
+    expect(entry?.seq).toBeNull();
+    expect(entry?.assetUrl).toBe("https://media.tenor.com/abc/full.gif");
+  });
+
+  /**
+   * The reflow requirement, at the point the bubble is first drawn. The
+   * dimensions are known before the send -- from the provider for a GIF, from
+   * the registry for a sticker -- so the box is its final size from the first
+   * frame rather than growing when the asset loads.
+   */
+  it("carries the dimensions the bubble reserves its space from", () => {
+    const state = applyPendingAsset(emptyConversation(), {
+      clientMessageId: "client-sticker",
+      senderId: "ada",
+      kind: "STICKER",
+      assetUrl: "/stickers/reactions/heart.svg",
+      body: "Heart",
+      assetWidth: 160,
+      assetHeight: 160,
+      createdAt: "2026-09-05T10:00:00.000Z",
+    });
+
+    expect(state.entries[0]?.assetWidth).toBe(160);
+    expect(state.entries[0]?.assetHeight).toBe(160);
+  });
+
+  it("settles into the Accepted Message on its Client Message Id", () => {
+    const pending = applyPendingAsset(emptyConversation(), {
+      clientMessageId: "client-1",
+      senderId: "ada",
+      kind: "GIF",
+      assetUrl: "https://media.tenor.com/abc/full.gif",
+      body: "a dancing cat",
+      assetWidth: 498,
+      assetHeight: 362,
+      createdAt: "2026-09-05T10:00:00.000Z",
+    });
+
+    const settled = applyAccepted(
+      pending,
+      wire("1", {
+        kind: "GIF",
+        body: "a dancing cat",
+        assetUrl: "https://media.tenor.com/abc/full.gif",
+        assetWidth: 498,
+        assetHeight: 362,
+      }),
+    );
+
+    expect(settled.entries).toHaveLength(1);
+    expect(settled.entries[0]?.seq).toBe("1");
+    expect(settled.entries[0]?.pending).toBe(false);
+  });
+
+  /**
+   * The same rule `applyPending` and `applyPendingImage` follow: a Message the
+   * Conversation already holds is left alone, so a retry after a reload does
+   * not render a second bubble or drag an Accepted one back into "Sending...".
+   */
+  it("leaves a Message the Conversation already holds exactly as it is", () => {
+    const accepted = applyAccepted(
+      emptyConversation(),
+      wire("1", { kind: "GIF", clientMessageId: "client-1" }),
+    );
+
+    const retried = applyPendingAsset(accepted, {
+      clientMessageId: "client-1",
+      senderId: "ada",
+      kind: "GIF",
+      assetUrl: "https://media.tenor.com/abc/full.gif",
+      body: "a dancing cat",
+      assetWidth: 498,
+      assetHeight: 362,
+      createdAt: "2026-09-05T10:00:00.000Z",
+    });
+
+    expect(retried.entries).toHaveLength(1);
+    expect(retried.entries[0]?.seq).toBe("1");
+    expect(retried.entries[0]?.pending).toBe(false);
+  });
+});
+
+/**
+ * Which kinds carry a URL into client state, and which deliberately do not.
+ *
+ * An IMAGE's `assetUrl` is a key in a private bucket. Nothing in the browser
+ * can fetch it -- the picture is asked for by Message id through the
+ * authorized route, so the read model rules on it each time (ADR-0003) -- and
+ * putting the object's name in the page would be disclosing where it lives for
+ * no one's benefit. A GIF and a sticker are the opposite case: their URLs are
+ * already public, and the bubble renders straight from them.
+ */
+describe("assetUrl on an entry", () => {
+  it("is withheld from an image, whose url is a private storage key", () => {
+    const state = applyAccepted(
+      emptyConversation(),
+      wire("1", {
+        kind: "IMAGE",
+        body: null,
+        assetUrl: "attachments/secret-object-key",
+        assetWidth: 800,
+        assetHeight: 600,
+      }),
+    );
+
+    expect(state.entries[0]?.assetUrl).toBeNull();
+  });
+
+  it("is carried through for a GIF, which renders from it directly", () => {
+    const state = applyAccepted(
+      emptyConversation(),
+      wire("1", {
+        kind: "GIF",
+        body: "a dancing cat",
+        assetUrl: "https://media.tenor.com/abc/full.gif",
+        assetWidth: 498,
+        assetHeight: 362,
+      }),
+    );
+
+    expect(state.entries[0]?.assetUrl).toBe("https://media.tenor.com/abc/full.gif");
+  });
+
+  it("is carried through for a sticker", () => {
+    const state = applyAccepted(
+      emptyConversation(),
+      wire("1", {
+        kind: "STICKER",
+        body: "Thumbs up",
+        assetUrl: "/stickers/reactions/thumbs-up.svg",
+        assetWidth: 160,
+        assetHeight: 160,
+      }),
+    );
+
+    expect(state.entries[0]?.assetUrl).toBe("/stickers/reactions/thumbs-up.svg");
+  });
+
+  /**
+   * The dimensions are what the bubble reserves its space from, so they must
+   * survive for every kind that draws a picture -- including the image, whose
+   * URL does not. Without them a virtualized row measures short and grows when
+   * the bytes decode, which moves everything below it.
+   */
+  it("keeps the dimensions a bubble reserves from, even where the url is withheld", () => {
+    const state = applyAccepted(
+      emptyConversation(),
+      wire("1", {
+        kind: "IMAGE",
+        body: null,
+        assetUrl: "attachments/k",
+        assetWidth: 800,
+        assetHeight: 600,
+      }),
+    );
+
+    expect(state.entries[0]?.assetWidth).toBe(800);
+    expect(state.entries[0]?.assetHeight).toBe(600);
   });
 });

@@ -99,6 +99,33 @@ export function toWireConversation(summary: ConversationSummary): WireConversati
   };
 }
 
+/**
+ * A GIF search result as `/api/gifs/search` returns it.
+ *
+ * Here rather than in the provider adapter because both sides need it and only
+ * one of them may import the other: the picker runs in the browser, and the
+ * adapter is the module that holds the provider's key. Declaring it twice
+ * would be a copy that can drift from the wire it describes -- so the adapter
+ * imports this shape and builds to it, which is also what makes "the result is
+ * rebuilt field by field rather than forwarded" a thing the type enforces.
+ */
+export interface WireGif {
+  /** The provider's id. It is what a client sends back to attach this GIF. */
+  id: string;
+  /** What the GIF depicts, used as the bubble's alt text. */
+  description: string;
+  /** A small copy, cheap enough to show a grid of. */
+  previewUrl: string;
+  /** The full-size GIF, which is what a sent Message renders. */
+  fullUrl: string;
+  /**
+   * The full-size GIF's intrinsic dimensions -- not the preview's. The bubble
+   * reserves its space from these, and it is the full GIF it will render.
+   */
+  width: number;
+  height: number;
+}
+
 /** A page of history as it crosses the wire, newest Message first. */
 export interface WireMessagePage {
   messages: WireMessage[];

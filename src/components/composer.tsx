@@ -3,6 +3,8 @@
 import { useRef, useState } from "react";
 import { ImagePlus } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { ExpressivePicker } from "@/components/expressive-picker";
+import type { WireGif } from "@/lib/wire";
 
 /**
  * The send box.
@@ -20,6 +22,8 @@ import { Button } from "@/components/ui/button";
 export function Composer({
   onSend,
   onSendImage,
+  onSendGif,
+  onSendSticker,
   offline = false,
   onTyping,
 }: {
@@ -30,6 +34,14 @@ export function Composer({
    * wait on the upload and stays usable while it runs.
    */
   onSendImage?: (file: File) => void;
+  /**
+   * Called with a chosen GIF, by the provider's id. The picker is rendered
+   * only when both of these are given, since a panel with one working tab and
+   * one missing one would be worse than no panel.
+   */
+  onSendGif?: (gif: WireGif) => void;
+  /** Called with a chosen sticker's pack and sticker ids. */
+  onSendSticker?: (packId: string, stickerId: string) => void;
   /** Changes what the box says, never whether it accepts what is typed. */
   offline?: boolean;
   /**
@@ -97,6 +109,9 @@ export function Composer({
             <ImagePlus className="size-4" aria-hidden />
           </Button>
         </>
+      ) : null}
+      {onSendGif && onSendSticker ? (
+        <ExpressivePicker onSendGif={onSendGif} onSendSticker={onSendSticker} />
       ) : null}
       <textarea
         ref={inputRef}

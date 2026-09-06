@@ -39,6 +39,30 @@ export interface OutboxEntry {
     assetWidth: number;
     assetHeight: number;
   };
+  /**
+   * Set on a GIF or sticker send, naming what the server should re-resolve.
+   *
+   * The identifiers are what the send carries; the URL and dimensions beside
+   * them are only what the *pending bubble* is drawn from after a reload. The
+   * server never sees them -- it re-resolves the ids and stores what it finds,
+   * so a tampered entry here can change what its own browser draws for a
+   * moment and nothing else. That separation is the whole reason the send is
+   * by id.
+   *
+   * There are no bytes to keep either way: a sticker ships with the
+   * application and a GIF lives at the provider, so unlike an image this is
+   * small enough to sit in storage and be retried across a reload -- and
+   * unlike an image, the retried bubble can still show the picture, because
+   * the URL it was drawn from outlives the page.
+   */
+  asset?: {
+    assetUrl: string;
+    assetWidth: number;
+    assetHeight: number;
+  } & (
+    | { kind: "GIF"; gifId: string }
+    | { kind: "STICKER"; packId: string; stickerId: string }
+  );
 }
 
 /**
@@ -71,6 +95,31 @@ function isImage(value: unknown): value is NonNullable<OutboxEntry["image"]> {
   );
 }
 
+function isAsset(value: unknown): value is NonNullable<OutboxEntry["asset"]> {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as {
+    kind?: unknown;
+    gifId?: unknown;
+    packId?: unknown;
+    stickerId?: unknown;
+    assetUrl?: unknown;
+    assetWidth?: unknown;
+    assetHeight?: unknown;
+  };
+  if (
+    typeof candidate.assetUrl !== "string" ||
+    typeof candidate.assetWidth !== "number" ||
+    typeof candidate.assetHeight !== "number"
+  ) {
+    return false;
+  }
+  if (candidate.kind === "GIF") return typeof candidate.gifId === "string";
+  if (candidate.kind === "STICKER") {
+    return typeof candidate.packId === "string" && typeof candidate.stickerId === "string";
+  }
+  return false;
+}
+
 function isEntry(value: unknown): value is OutboxEntry {
   if (typeof value !== "object" || value === null) return false;
   const candidate = value as Partial<OutboxEntry>;
@@ -82,10 +131,11 @@ function isEntry(value: unknown): value is OutboxEntry {
   ) {
     return false;
   }
-  // An image entry is only usable if its whole descriptor survived. A
+  // An image or asset entry is only usable if its whole descriptor survived. A
   // half-written one would be retried as a text Message with an empty body,
   // which is a worse outcome than dropping it.
-  return candidate.image === undefined || isImage(candidate.image);
+  if (candidate.image !== undefined && !isImage(candidate.image)) return false;
+  return candidate.asset === undefined || isAsset(candidate.asset);
 }
 
 /**

@@ -101,6 +101,15 @@ export type SendError =
   | "PROHIBITED_LANGUAGE"
   /** The named object is not one this sender may attach -- see `message:sendImage`. */
   | "INVALID_ASSET"
+  /**
+   * The provider holds nothing under that id, or could not be asked. One error
+   * for both, deliberately: a client can do nothing different with "no such
+   * GIF" than with "the provider is down", and distinguishing them would make
+   * this an oracle for which ids the provider's index contains.
+   */
+  | "GIF_UNAVAILABLE"
+  /** No such sticker in any bundled pack -- see `message:sendSticker`. */
+  | "UNKNOWN_STICKER"
   | "INTERNAL";
 
 /** The reply to a sync: the Messages missed, or why the gap could not be read. */
@@ -258,6 +267,48 @@ export interface ClientToServerEvents {
       /** Measured in the browser, so the bubble can reserve its space. */
       assetWidth: number;
       assetHeight: number;
+    },
+    callback: (reply: SendReply) => void,
+  ) => void;
+  /**
+   * Send a GIF, named by the provider's id and never by a URL.
+   *
+   * The id is the whole security design of this path. A GIF skips
+   * classification -- it is not content this application has looked at, and
+   * ADR-0003's asynchronous path buys nothing for it -- so if the client named
+   * the URL, the GIF event would be a way to put an arbitrary unmoderated image
+   * into a Conversation while bypassing the check images go through. Instead
+   * the server re-resolves the id against the provider and stores what the
+   * provider answers, which means a GIF Message can only ever point at
+   * something in the provider's index.
+   *
+   * One round trip, unlike an image: there is nothing to wait for, so the
+   * Message is Accepted VISIBLE and broadcast before the ack returns.
+   */
+  "message:sendGif": (
+    payload: {
+      conversationId: string;
+      clientMessageId: string;
+      /** The provider's own id, as returned by `/api/gifs/search`. */
+      gifId: string;
+    },
+    callback: (reply: SendReply) => void,
+  ) => void;
+  /**
+   * Send a sticker from one of the bundled packs.
+   *
+   * Both ids are looked up in the registry rather than used to build a path.
+   * The registry is a closed set the application ships, so an id naming
+   * anything outside it is refused -- which is what stops a crafted id
+   * reaching a file that is not a sticker. Like a GIF and unlike an image,
+   * there is nothing unseen here, so it is Accepted VISIBLE straight away.
+   */
+  "message:sendSticker": (
+    payload: {
+      conversationId: string;
+      clientMessageId: string;
+      packId: string;
+      stickerId: string;
     },
     callback: (reply: SendReply) => void,
   ) => void;
