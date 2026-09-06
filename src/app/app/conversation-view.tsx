@@ -239,6 +239,10 @@ export function ConversationView({
               <div className="shrink-0 shadow-[0_-1px_0_0_rgb(0_0_0/0.08)]">
                 <Composer
                   onSend={conversation.send}
+                  // Fire-and-forget: the upload runs in the background and any
+                  // refusal is reported on the bubble it belongs to, so the
+                  // composer never waits on it.
+                  onSendImage={(file) => void conversation.sendImage(file)}
                   offline={status !== "connected"}
                   onTyping={conversation.setTyping}
                 />

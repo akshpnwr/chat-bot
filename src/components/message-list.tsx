@@ -32,6 +32,76 @@ function formatTime(iso: string): string {
 }
 
 /**
+ * The widest an image bubble is drawn, in pixels.
+ *
+ * A cap rather than a natural size: a 4000px photograph would otherwise be a
+ * bubble wider than the thread. The height is derived from it by the image's
+ * own aspect ratio, so the reserved box stays the shape the picture actually
+ * is.
+ */
+const MAX_IMAGE_WIDTH_PX = 320;
+
+/**
+ * An image in the thread, occupying its final size before it has loaded.
+ *
+ * This is the requirement about reflow, and it is met by arithmetic rather
+ * than by a spinner. The sender's browser measured the image before uploading
+ * it and those dimensions were stored on the Message, so the box can be given
+ * its exact aspect ratio now -- which means the bytes arriving change what is
+ * inside the box and never the layout around it. A bubble that sized itself
+ * when the image loaded would push every Message below it down at that moment,
+ * which in a virtualized list is a scroll jump rather than merely a flicker.
+ *
+ * An image with no dimensions recorded falls back to a square. That is a real
+ * case -- a Message written before the columns existed -- and a square box is
+ * a wrong reservation, but a wrong reservation still holds still, whereas no
+ * reservation reflows.
+ */
+function ImageBubble({ entry }: { entry: ConversationEntry }) {
+  const width = entry.assetWidth ?? 1;
+  const height = entry.assetHeight ?? 1;
+  const displayWidth = Math.min(width, MAX_IMAGE_WIDTH_PX);
+  const displayHeight = Math.round((displayWidth * height) / width);
+
+  // The local preview while the sender's own upload is in flight, and the
+  // authorized route once the Message has been Accepted. The route is asked
+  // for by Message id rather than given a storage URL, so the read model
+  // decides who may see it (ADR-0003) each time rather than once.
+  const source = entry.previewUrl
+    ? entry.previewUrl
+    : entry.id && !entry.failed
+      ? `/api/messages/${entry.id}/asset`
+      : null;
+
+  return (
+    <span
+      className="bg-recessed block overflow-hidden rounded-[12px]"
+      style={{
+        width: `${displayWidth}px`,
+        // Reserved from the aspect ratio rather than left to the image, so the
+        // space exists before the bytes do.
+        aspectRatio: `${width} / ${height}`,
+        maxWidth: "100%",
+      }}
+    >
+      {source ? (
+        <img
+          src={source}
+          alt=""
+          width={displayWidth}
+          height={displayHeight}
+          className="block h-full w-full object-cover"
+          // Nothing above the fold is worth blocking render for, and a thread
+          // scrolled back through may hold hundreds of these.
+          loading="lazy"
+          decoding="async"
+        />
+      ) : null}
+    </span>
+  );
+}
+
+/**
  * The virtualized Conversation.
  *
  * Hand-built on TanStack Virtual rather than composed from shell components
@@ -282,7 +352,11 @@ export function MessageList({
                   data-message-body
                   data-pending={entry.pending ? "true" : undefined}
                   className={cn(
-                    "max-w-[85%] rounded-[12px] px-3 py-2 text-[14px] leading-5 break-words whitespace-pre-wrap sm:max-w-[70%]",
+                    "max-w-[85%] rounded-[12px] text-[14px] leading-5 break-words whitespace-pre-wrap sm:max-w-[70%]",
+                    // An image fills its bubble; only text needs the inset. A
+                    // padded image bubble would draw a frame of the sender's
+                    // colour around every picture.
+                    entry.kind === "IMAGE" ? "overflow-hidden p-0" : "px-3 py-2",
                     mine
                       ? "bg-foreground text-elevated"
                       : "bg-elevated text-foreground shadow-border",
@@ -293,7 +367,11 @@ export function MessageList({
                     entry.failed && "shadow-[0_0_0_1px_var(--color-status-red)]",
                   )}
                 >
-                  {entry.body}
+                  {entry.kind === "IMAGE" ? (
+                    <ImageBubble entry={entry} />
+                  ) : (
+                    entry.body
+                  )}
                 </div>
                 <span
                   className={cn(
@@ -313,17 +391,24 @@ export function MessageList({
                   {entry.failureReason
                     ? entry.failureReason
                     : entry.failed
-                    ? "Not delivered"
-                    : entry.pending
-                      ? "Sending…"
-                      : formatTime(entry.createdAt)}
+                      ? "Not delivered"
+                      : entry.pending
+                        ? "Sending…"
+                        : entry.awaitingModeration
+                          ? // Distinct from "Sending…" because the Message has
+                            // been Accepted -- it is stored and will not be
+                            // retried. What it is waiting on is the check, and
+                            // saying so is what makes the wait explicable
+                            // rather than looking like a stalled upload.
+                            "Checking image…"
+                          : formatTime(entry.createdAt)}
                   {/*
                     Only on the viewer's own Messages, and only once accepted.
                     A receipt on a received Message would be telling the reader
                     what they themselves have read, which is not information;
                     the sender is the one who wanted to know it landed.
                   */}
-                  {mine && !entry.pending && !entry.failed
+                  {mine && !entry.pending && !entry.failed && !entry.awaitingModeration
                     ? isRead(entry, otherLastReadSeq)
                       ? " · Read"
                       : " · Sent"

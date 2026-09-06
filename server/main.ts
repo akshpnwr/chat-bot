@@ -37,6 +37,22 @@ async function main() {
   });
   console.log(`[server] ready on http://localhost:${port} (dev=${dev})`);
 
+  // Loaded after the server is listening, and deliberately not awaited. The
+  // model costs ~74 MB and a few seconds to load (ADR-0007); paying that here
+  // means the first person to send an image does not, while starting it after
+  // `listen` means health checks are answered during the load rather than
+  // after it. `classifyImage` loads on demand if this has not finished, so
+  // this is an optimisation rather than a prerequisite.
+  const { warmNudityClassifier } = await import("../src/server/moderation/nudity.js");
+  warmNudityClassifier()
+    .then(() => console.log("[server] nudity classifier ready"))
+    .catch((error: unknown) => {
+      // Logged, not fatal. The classifier retries its load on the next image,
+      // and an image that cannot be classified is refused rather than
+      // delivered -- so a failed warm costs latency, never a bypass.
+      console.error("[server] warming the nudity classifier failed", error);
+    });
+
   const shutdown = (signal: string) => {
     console.log(`[server] ${signal} received, closing`);
     httpServer.close(() => process.exit(0));

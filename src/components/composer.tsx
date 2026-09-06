@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
+import { ImagePlus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 /**
@@ -18,10 +19,17 @@ import { Button } from "@/components/ui/button";
  */
 export function Composer({
   onSend,
+  onSendImage,
   offline = false,
   onTyping,
 }: {
   onSend: (body: string) => void;
+  /**
+   * Called with a chosen image. Fire-and-forget like `onSend`: the caller
+   * renders the bubble and reports any refusal on it, so the composer does not
+   * wait on the upload and stays usable while it runs.
+   */
+  onSendImage?: (file: File) => void;
   /** Changes what the box says, never whether it accepts what is typed. */
   offline?: boolean;
   /**
@@ -34,6 +42,7 @@ export function Composer({
 }) {
   const [value, setValue] = useState("");
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
 
   function submit() {
     const body = value.trim();
@@ -57,6 +66,38 @@ export function Composer({
         submit();
       }}
     >
+      {onSendImage ? (
+        <>
+          {/*
+            The real control is the button beside it; this input is only the
+            file picker it opens. Styling a file input directly is famously
+            unreliable across browsers, so it is kept out of the layout and
+            driven programmatically instead.
+          */}
+          <input
+            ref={fileRef}
+            type="file"
+            className="hidden"
+            accept="image/jpeg,image/png,image/webp,image/gif"
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              // Cleared whether or not a file was chosen, so picking the same
+              // file twice in a row still fires a change event the second time.
+              event.target.value = "";
+              if (file) onSendImage(file);
+            }}
+          />
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            aria-label="Attach an image"
+            onClick={() => fileRef.current?.click()}
+          >
+            <ImagePlus className="size-4" aria-hidden />
+          </Button>
+        </>
+      ) : null}
       <textarea
         ref={inputRef}
         rows={1}

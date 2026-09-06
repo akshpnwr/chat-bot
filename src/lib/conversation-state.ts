@@ -1,4 +1,5 @@
 import { compareSequence, maxSequence, type Sequence } from "./sequence";
+import type { MessageKind } from "@prisma/client";
 import type { WireMessage } from "./wire";
 
 /**
@@ -27,7 +28,42 @@ export interface ConversationEntry {
   createdAt: string;
   /** True until the server has Accepted this Message. */
   pending: boolean;
-  /** Set when the send failed, so the reader is told rather than left waiting. */
+  /** TEXT or IMAGE. An image has no body and is rendered from its asset. */
+  kind: MessageKind;
+  /**
+   * True while an Accepted image is being classified.
+   *
+   * Deliberately distinct from `pending`, which text also uses. A PENDING
+   * image has been Accepted -- it has a Sequence, it is durably stored, and it
+   * will not be retried -- but it has not been ruled on, so it is neither
+   * still sending nor delivered. Collapsing the two states into one flag would
+   * have the sender's own retry logic treat a stored image as unsent.
+   */
+  awaitingModeration?: boolean;
+  /**
+   * A local preview of an image the sender has chosen, before the server has
+   * anything to show. An object URL belonging to this tab, so it means nothing
+   * to anyone else and is never sent anywhere.
+   */
+  previewUrl?: string;
+  /**
+   * Intrinsic dimensions, carried so the bubble can reserve exactly the space
+   * the image will occupy before a byte of it has loaded. This is what keeps
+   * the thread from reflowing as images arrive.
+   */
+  assetWidth?: number | null;
+  assetHeight?: number | null;
+  /**
+   * Set when the Message will not be delivered, so the reader is told rather
+   * than left waiting.
+   *
+   * Covers both of CONTEXT.md's cases -- a send that failed, which the outbox
+   * retries, and a Refusal, which is final. They are distinct domain events
+   * and the retry logic keeps them apart; this flag is only about what the
+   * bubble says, and both say the Message did not go. `failureReason` is what
+   * separates them to the reader: a Refusal always carries one and renders it
+   * instead of the generic "Not delivered".
+   */
   failed?: boolean;
   /**
    * Why the send failed, when there is something useful to say -- the term
@@ -55,6 +91,12 @@ export function emptyConversation(): ConversationState {
 }
 
 function toEntry(message: WireMessage): ConversationEntry {
+  // A refusal is rendered as a failure carrying its reason, which is the same
+  // shape a refused text Message takes. That is deliberate: to the sender the
+  // two are the same event -- something they wrote was not delivered, and here
+  // is why -- so the list has one failure path rather than two.
+  const refused = message.status === "REJECTED";
+
   return {
     seq: message.seq,
     id: message.id,
@@ -63,6 +105,12 @@ function toEntry(message: WireMessage): ConversationEntry {
     body: message.body,
     createdAt: message.createdAt,
     pending: false,
+    kind: message.kind,
+    awaitingModeration: message.status === "PENDING",
+    failed: refused || undefined,
+    failureReason: refused ? (message.moderationReason ?? undefined) : undefined,
+    assetWidth: message.assetWidth,
+    assetHeight: message.assetHeight,
   };
 }
 
@@ -124,6 +172,54 @@ export function applyPending(
     body: message.body,
     createdAt: message.createdAt,
     pending: true,
+    kind: "TEXT",
+  };
+  return { ...state, entries: [...state.entries, entry].sort(byPosition) };
+}
+
+/**
+ * Renders an image the sender has chosen, before the server has Accepted it.
+ *
+ * It carries a local object URL rather than waiting for a server-side one, so
+ * the sender sees the picture they just picked immediately -- and it carries
+ * the dimensions their browser measured, so the bubble occupies its final size
+ * from the first frame. The alternative, a grey box that becomes an image, is
+ * a reflow of the whole thread at the moment the upload finishes.
+ *
+ * A Message the Conversation already holds is left exactly as it is, for the
+ * same reason `applyPending` does it: the retry path re-renders every
+ * unacknowledged send, and an Accepted image must not be dragged back into
+ * "Sending…".
+ */
+export function applyPendingImage(
+  state: ConversationState,
+  image: {
+    clientMessageId: string;
+    senderId: string;
+    /** An object URL for this tab only; never sent anywhere. */
+    previewUrl: string;
+    assetWidth: number;
+    assetHeight: number;
+    createdAt: string;
+  },
+): ConversationState {
+  const held = state.entries.some(
+    (entry) => entry.clientMessageId === image.clientMessageId,
+  );
+  if (held) return state;
+
+  const entry: ConversationEntry = {
+    seq: null,
+    id: null,
+    clientMessageId: image.clientMessageId,
+    senderId: image.senderId,
+    body: null,
+    createdAt: image.createdAt,
+    pending: true,
+    kind: "IMAGE",
+    previewUrl: image.previewUrl,
+    assetWidth: image.assetWidth,
+    assetHeight: image.assetHeight,
   };
   return { ...state, entries: [...state.entries, entry].sort(byPosition) };
 }

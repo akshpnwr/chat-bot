@@ -104,7 +104,17 @@ export function ConversationList({
                     unread > 0 ? "text-foreground" : "text-muted",
                   )}
                 >
-                  {conversation.latestMessage?.body ?? "No messages yet"}
+                  {/*
+                    An image has no body to preview, so it is named rather than
+                    left blank -- a Conversation whose last Message was a photo
+                    would otherwise read "No messages yet", which is false.
+                  */}
+                  {conversation.latestMessage === null
+                    ? "No messages yet"
+                    : (conversation.latestMessage.body ??
+                      (conversation.latestMessage.kind === "IMAGE"
+                        ? "Photo"
+                        : "No messages yet"))}
                 </span>
               </span>
               {/*

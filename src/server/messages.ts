@@ -1,6 +1,6 @@
-import { MessageStatus, Prisma, type Message } from "@prisma/client";
+import { MessageKind, MessageStatus, Prisma, type Message } from "@prisma/client";
 import { prisma } from "@/lib/db";
-import { assertParticipant } from "@/server/authorization";
+import { assertParticipant, NotAParticipantError } from "@/server/authorization";
 import { screen } from "@/server/moderation/profanity";
 
 /** Postgres' unique-violation code, raised by the idempotency constraint. */
@@ -230,4 +230,210 @@ export async function syncMessages({
     messages: hasMore ? found.slice(0, SYNC_PAGE_LIMIT) : found,
     hasMore,
   };
+}
+
+/**
+ * Accepts an image into a Conversation as PENDING, before it has been classified.
+ *
+ * This is the asynchronous path ADR-0003 was written for, and the reason text
+ * and images diverge here. Profanity screening is a sub-millisecond pure
+ * function, so a text Message can be ruled on inside the send and written
+ * VISIBLE or not written at all. Classification is not: it costs around 50 ms
+ * on the WASM backend (ADR-0007), which is too long to hold a send's
+ * acknowledgement open. So the Message is Accepted first -- durably stored,
+ * with its Sequence assigned -- and ruled on afterwards.
+ *
+ * Accepting before classifying is safe precisely because visibility is a
+ * property of the read model rather than of the broadcast. A PENDING Message
+ * is filtered out of every recipient-facing query by `readMessages` and
+ * `syncMessages`, so the window between acceptance and the verdict is not a
+ * window in which the recipient can reach the image by paging, syncing, or
+ * anything else. The sender sees it, which is what their spinner is drawn from.
+ *
+ * The asset is recorded by its quarantine key rather than a URL. Until the
+ * verdict lands there is no URL worth handing out, and storing one would mean
+ * the row briefly names a readable location for an image nobody has looked at.
+ *
+ * Membership and idempotency work exactly as they do for text -- the same
+ * guard, the same constraint, resolved the same way -- because a retried image
+ * send is the same send, and must not become a second Message with a second
+ * upload behind it.
+ */
+export async function sendImageMessage({
+  senderId,
+  conversationId,
+  clientMessageId,
+  assetKey,
+  assetWidth,
+  assetHeight,
+}: {
+  senderId: string;
+  conversationId: string;
+  clientMessageId: string;
+  /** The object's key in quarantine; it becomes a URL only once promoted. */
+  assetKey: string;
+  /**
+   * The image's intrinsic dimensions, measured by the sender's browser before
+   * the upload. Stored so the list can reserve the bubble's space before the
+   * image loads, which is what keeps the thread from reflowing around it.
+   */
+  assetWidth: number;
+  assetHeight: number;
+}): Promise<Message> {
+  await assertParticipant(senderId, conversationId);
+
+  try {
+    return await prisma.message.create({
+      data: {
+        senderId,
+        conversationId,
+        clientMessageId,
+        kind: MessageKind.IMAGE,
+        status: MessageStatus.PENDING,
+        assetUrl: assetKey,
+        assetWidth,
+        assetHeight,
+      },
+    });
+  } catch (error) {
+    if (
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      error.code === UNIQUE_VIOLATION
+    ) {
+      const existing = await prisma.message.findUnique({
+        where: { conversationId_clientMessageId: { conversationId, clientMessageId } },
+      });
+      if (existing) return existing;
+    }
+    throw error;
+  }
+}
+
+/**
+ * Clears a classified image for delivery.
+ *
+ * The transition and the promoted key are written together, in one update, so
+ * there is no instant at which a Message is VISIBLE while still pointing into
+ * quarantine -- which is the one ordering that would have the recipient
+ * fetching an object that is about to be moved out from under them.
+ *
+ * Only a PENDING Message is transitioned. The `status` in the WHERE clause is
+ * what makes this safe to run twice: a Message already ruled on -- cleared by
+ * a duplicate worker, or REJECTED -- matches nothing and is left exactly as it
+ * is, rather than a rejection being quietly overwritten into a delivery.
+ */
+export async function visibleImageMessage({
+  messageId,
+  assetUrl,
+}: {
+  messageId: string;
+  assetUrl: string;
+}): Promise<Message> {
+  const updated = await prisma.message.updateManyAndReturn({
+    where: { id: messageId, status: MessageStatus.PENDING },
+    data: { status: MessageStatus.VISIBLE, assetUrl },
+  });
+
+  const message = updated[0];
+  if (message) return message;
+
+  // Nothing matched, so it had already been ruled on. Returning the row as it
+  // stands lets the caller see the decision that won rather than throwing at
+  // it -- a second verdict arriving late is a race, not a failure.
+  const existing = await prisma.message.findUnique({ where: { id: messageId } });
+  if (!existing) throw new Error(`No such Message: ${messageId}`);
+  return existing;
+}
+
+/**
+ * Records that a classified image failed moderation.
+ *
+ * The row is kept rather than deleted, at REJECTED, and that is the whole
+ * mechanism by which the recipient never learns it existed: every
+ * recipient-facing query filters on VISIBLE (ADR-0003), so the Message is
+ * unreachable by history, pagination and reconnect sync alike -- not merely
+ * absent from a broadcast that was never sent.
+ *
+ * Keeping it is also what the sender needs. They saw the image go, and a row
+ * that vanished would leave them with an image that silently disappeared
+ * rather than one that says why it was refused. The reason is stored on the
+ * Message for exactly that.
+ *
+ * The `assetUrl` is cleared as it is rejected. The object itself is deleted by
+ * the caller, and leaving the row naming a key that no longer exists -- or
+ * worse, one that still does -- would be a pointer to content the system has
+ * just decided must not be delivered.
+ *
+ * Guarded on PENDING for the same reason as the clearance above, so a late
+ * duplicate cannot flip an already-decided Message.
+ */
+export async function rejectImageMessage({
+  messageId,
+  reason,
+}: {
+  messageId: string;
+  reason: string;
+}): Promise<Message> {
+  const updated = await prisma.message.updateManyAndReturn({
+    where: { id: messageId, status: MessageStatus.PENDING },
+    data: {
+      status: MessageStatus.REJECTED,
+      moderationReason: reason,
+      assetUrl: null,
+    },
+  });
+
+  const message = updated[0];
+  if (message) return message;
+
+  const existing = await prisma.message.findUnique({ where: { id: messageId } });
+  if (!existing) throw new Error(`No such Message: ${messageId}`);
+  return existing;
+}
+
+/**
+ * The storage key a User is allowed to read for one image Message.
+ *
+ * This exists because a presigned GET is a real capability against the bucket,
+ * and handing one out is a read of the Conversation just as much as loading a
+ * page of history is. Deciding it here rather than in the route means the
+ * asset path is governed by the same rule as every other read route
+ * (ADR-0003), rather than by a second rule written beside it that could drift.
+ *
+ * The rule is `readMessages`' rule narrowed to a single Message: VISIBLE to
+ * anybody in the Conversation, and the sender's own Messages at any status --
+ * which is what lets a sender see the image they just sent while it is still
+ * being classified. A REJECTED Message satisfies neither for the recipient,
+ * and for the sender it has had its key cleared, so there is nothing to give
+ * out in either case.
+ *
+ * Every refusal is the same `NotAParticipantError`, whatever the actual cause:
+ * a Message that does not exist, one in somebody else's Conversation, and one
+ * that failed moderation are indistinguishable from outside. Distinguishing
+ * them would turn this route into an oracle for which Message ids exist and
+ * which images were refused.
+ */
+export async function readableAsset({
+  userId,
+  messageId,
+}: {
+  userId: string;
+  messageId: string;
+}): Promise<string> {
+  const message = await prisma.message.findUnique({ where: { id: messageId } });
+  if (!message || message.assetUrl === null) {
+    throw new NotAParticipantError(userId, "unknown");
+  }
+
+  // Membership first, so a stranger learns nothing about the Message beyond
+  // the refusal they would have received anyway.
+  await assertParticipant(userId, message.conversationId);
+
+  const readable =
+    message.status === MessageStatus.VISIBLE || message.senderId === userId;
+  if (!readable) {
+    throw new NotAParticipantError(userId, message.conversationId);
+  }
+
+  return message.assetUrl;
 }
