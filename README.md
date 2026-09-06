@@ -4,7 +4,8 @@ A real-time one-to-one messaging system. Messages are delivered over a persisten
 moderated server-side before they become visible, and survive disconnection without loss or
 duplication.
 
-- **Live deployment:** _not yet provisioned — see [Deployment](#deployment)_
+- **Live deployment:** **https://chat-bot-qm8d.onrender.com** — sign in with the
+  [demo accounts](#demo-accounts) below
 - **Demo accounts:** [below](#demo-accounts)
 - **Domain language:** [`CONTEXT.md`](CONTEXT.md) — the vocabulary this README uses
 - **Decisions:** [`docs/adr/`](docs/adr) — nine records, each naming what was rejected and why
@@ -269,36 +270,35 @@ product code it exercises is covered by unit tests.
 
 ## Deployment
 
-> **Status: not yet provisioned.** The application is deployment-ready — it builds to a single
-> process, reads all configuration from the environment, and exposes the health endpoint the
-> keep-warm ping needs — but no public URL exists yet. The steps below are what provisioning
-> requires.
-
-Target is Render's free web-service tier with Postgres on Neon
-([ADR-0001](docs/adr/0001-single-node-process-on-render.md)).
+Live at **https://chat-bot-qm8d.onrender.com**, on Render's free web-service tier with Postgres on
+Neon ([ADR-0001](docs/adr/0001-single-node-process-on-render.md)).
 
 - **Build:** `npm install && npm run build`
 - **Start:** `npm start`
 - **Health check path:** `/api/health`
-- **Environment:** every variable from [Setup](#setup), plus `PORT` (Render supplies it)
+- **Environment:** every variable from [Setup](#setup). `PORT` is supplied by Render and must not
+  be set by hand.
 
-After the first deploy:
+Two things a clean environment needs that a working checkout hides:
 
-1. Run `npm run db:deploy` and `npm run db:seed` against the production database so the demo
-   accounts exist.
-2. Set the `DEPLOYMENT_URL` repository variable to the public URL — this arms
-   [the keep-warm workflow](.github/workflows/keep-warm.yml), which stays skipped until it is set.
-3. Put the URL at the top of this README, replacing the "not yet provisioned" note.
+- **`postinstall` runs `prisma generate`.** `@prisma/client` is a re-export of a client the
+  generator writes into `node_modules`, so without this every type imported from it is missing and
+  the TypeScript build fails outright. Prisma 7 no longer generates on install by itself.
+- **The bind address ignores `HOSTNAME`.** Render sets it to the container's own name, which is not
+  an address: `listen` resolves it, gets `ENOTFOUND`, and the process dies before serving — which
+  the platform reports as a 502 rather than as a crash. `server/main.ts` binds `0.0.0.0` and takes
+  `BIND_HOST` as the deliberate override.
+
+After the first deploy, run `npm run db:deploy` and `npm run db:seed` against the production
+database so the demo accounts exist, and set the `DEPLOYMENT_URL` repository variable to the public
+URL — that arms [the keep-warm workflow](.github/workflows/keep-warm.yml), which stays skipped
+until it is set.
 
 ### Cold starts
 
 Render's free tier **spins the service down after 15 minutes without traffic**, and waking it takes
 roughly **60 seconds**. [`.github/workflows/keep-warm.yml`](.github/workflows/keep-warm.yml) pings
 `/api/health` every 10 minutes so the idle window never elapses.
-
-The workflow is committed but **inert until the deployment exists**: it skips unless the
-`DEPLOYMENT_URL` repository variable is set, so it cannot fail against a service nobody has
-provisioned yet. Setting that variable is the last step of [provisioning](#deployment).
 
 A cron can still miss, so **if the first page load takes up to a minute, the service is cold
 starting — not broken.** A second request lands on a warm process.
@@ -354,9 +354,10 @@ enough to be backed by Redis without changing its callers.
 
 ### Known gaps
 
-- **No public deployment yet** — see [Deployment](#deployment). The keep-warm workflow is committed
-  and waits on the `DEPLOYMENT_URL` variable; everything else needed to deploy is in place.
 - **No screen recording yet** — the required demo capture (real-time messaging between two
   accounts, typing, presence, unread counts, GIFs and stickers, both moderation paths, and recovery
   from a disconnection) has not been recorded.
+- **GIF search is unavailable on the deployment.** `GIFS_API_KEY` is unset there, which is a
+  supported state rather than a fault: stickers are bundled and work, and the GIF tab reports
+  itself unavailable. Setting the key on the service enables it with no redeploy of the code.
 - **The browser-driven suite is not dependable** — [#14](../../issues/14).
