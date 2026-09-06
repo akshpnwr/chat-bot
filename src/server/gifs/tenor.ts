@@ -13,6 +13,8 @@
  * provider through `gifProvider()` in ./provider.ts, which builds one.
  */
 
+import type { WireGif } from "@/lib/wire";
+
 /** Raised when the provider could not be asked, or would not answer. */
 export class GifSearchUnavailableError extends Error {
   readonly code = "GIF_SEARCH_UNAVAILABLE";
@@ -23,23 +25,14 @@ export class GifSearchUnavailableError extends Error {
   }
 }
 
-/** A search result, in the only shape that reaches the browser. */
-export interface GifResult {
-  /** The provider's id. It is what a client sends back to attach this GIF. */
-  id: string;
-  /** What the GIF depicts, used as the bubble's alt text. */
-  description: string;
-  /** A small copy, cheap enough to show a grid of. */
-  previewUrl: string;
-  /** The full-size GIF, which is what a sent Message renders. */
-  fullUrl: string;
-  /**
-   * The full-size GIF's intrinsic dimensions -- not the preview's. The bubble
-   * reserves its space from these, and it is the full GIF it will render.
-   */
-  width: number;
-  height: number;
-}
+/**
+ * A search result, in the only shape that reaches the browser.
+ *
+ * The shape itself lives in `src/lib/wire.ts` with the other wire types, since
+ * the picker needs it and must not import this module -- this is where the
+ * provider's key is. Aliased rather than re-declared so the two cannot drift.
+ */
+export type GifResult = WireGif;
 
 /** The media a resolved id actually points at, as stored on a Message. */
 export interface ResolvedGif {

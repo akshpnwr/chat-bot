@@ -1,6 +1,6 @@
 "use client";
 
-import type { WireConversation } from "@/lib/wire";
+import type { WireConversation, WireLatestMessage } from "@/lib/wire";
 import { cn } from "@/lib/utils";
 
 /** The initials shown when a Participant has no avatar image. */
@@ -11,6 +11,30 @@ function initials(name: string): string {
     .slice(0, 2)
     .map((part) => part[0]?.toUpperCase() ?? "")
     .join("");
+}
+
+/**
+ * What a Conversation's last Message reads as in the list.
+ *
+ * A picture is named rather than previewed. An image has no body at all, so a
+ * Conversation whose last Message was a photo would otherwise read "No
+ * messages yet", which is false. A GIF and a sticker do carry a body -- the
+ * provider's description and the pack's label -- but those are alt text rather
+ * than something the sender wrote, and a row reading "a dancing cat" would
+ * look like they said it.
+ *
+ * A map rather than a chain of ternaries, so a kind added later is a line here
+ * rather than another branch to thread through.
+ */
+const PREVIEW_BY_KIND: Partial<Record<WireLatestMessage["kind"], string>> = {
+  IMAGE: "Photo",
+  GIF: "GIF",
+  STICKER: "Sticker",
+};
+
+function previewOf(latest: WireLatestMessage | null): string {
+  if (latest === null) return "No messages yet";
+  return PREVIEW_BY_KIND[latest.kind] ?? latest.body ?? "No messages yet";
 }
 
 /**
@@ -104,24 +128,7 @@ export function ConversationList({
                     unread > 0 ? "text-foreground" : "text-muted",
                   )}
                 >
-                  {/*
-                    A picture is named rather than previewed. An image has no
-                    body at all, so a Conversation whose last Message was a
-                    photo would otherwise read "No messages yet", which is
-                    false. A GIF and a sticker do carry a body -- the
-                    provider's description and the pack's label -- but those
-                    are alt text rather than something the sender wrote, and a
-                    row reading "a dancing cat" would look like they said it.
-                  */}
-                  {conversation.latestMessage === null
-                    ? "No messages yet"
-                    : conversation.latestMessage.kind === "IMAGE"
-                      ? "Photo"
-                      : conversation.latestMessage.kind === "GIF"
-                        ? "GIF"
-                        : conversation.latestMessage.kind === "STICKER"
-                          ? "Sticker"
-                          : (conversation.latestMessage.body ?? "No messages yet")}
+                  {previewOf(conversation.latestMessage)}
                 </span>
               </span>
               {/*

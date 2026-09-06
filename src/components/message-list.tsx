@@ -42,6 +42,15 @@ function formatTime(iso: string): string {
 const MAX_IMAGE_WIDTH_PX = 320;
 
 /**
+ * How wide a sticker is drawn at most.
+ *
+ * Smaller than an image's cap on purpose: a sticker is a gesture rather than
+ * something to look at, and one rendered at photo size would carry more weight
+ * in the thread than the sentence beside it.
+ */
+const STICKER_WIDTH_PX = 128;
+
+/**
  * An image in the thread, occupying its final size before it has loaded.
  *
  * This is the requirement about reflow, and it is met by arithmetic rather
@@ -58,6 +67,48 @@ const MAX_IMAGE_WIDTH_PX = 320;
  * reservation reflows.
  */
 /**
+ * Whether a kind renders as a picture rather than as text.
+ *
+ * Named rather than spelled out at each site, because the same question is
+ * asked twice for two different reasons -- what fills the bubble, and how the
+ * bubble is padded -- and a kind added later should not have to be threaded
+ * through two cascades that could disagree.
+ */
+function isPicture(kind: ConversationEntry["kind"]): boolean {
+  return kind === "IMAGE" || kind === "GIF" || kind === "STICKER";
+}
+
+/**
+ * Whether a kind is drawn on the sender's coloured slab. Everything is except
+ * a sticker, whose artwork has its own transparent edges.
+ */
+function hasSlab(kind: ConversationEntry["kind"]): boolean {
+  return kind !== "STICKER";
+}
+
+/**
+ * The box a picture is drawn into, computed before any bytes exist.
+ *
+ * Shared by both bubbles because the reservation is the same problem for all
+ * three kinds: the thread is virtualized, so a row that measures short and
+ * grows when its image decodes moves everything below it -- and a reader who
+ * was part-way up the Conversation watches the text jump under their eyes.
+ * Reserving from the stored dimensions is what makes the row its final height
+ * from the first frame.
+ */
+function reserveBox(entry: ConversationEntry, cap: number) {
+  const width = entry.assetWidth ?? 1;
+  const height = entry.assetHeight ?? 1;
+  const displayWidth = Math.min(width, cap);
+  return {
+    width,
+    height,
+    displayWidth,
+    displayHeight: Math.round((displayWidth * height) / width),
+  };
+}
+
+/**
  * A GIF or a sticker.
  *
  * Rendered straight from `assetUrl` rather than through
@@ -70,43 +121,58 @@ const MAX_IMAGE_WIDTH_PX = 320;
  * nothing.
  *
  * It follows that the URL is usable the moment the sender picks it, so unlike
- * an image there is no pending state with no picture in it -- the sender and
- * the recipient look at the same thing from the first frame.
+ * an image there is no pending state with no picture in it. The space is still
+ * reserved the same way, though: having the URL is not having the bytes, and
+ * the decode lands after the row has been measured either way.
  */
 function AssetBubble({ entry }: { entry: ConversationEntry }) {
-  const width = entry.assetWidth ?? 1;
-  const height = entry.assetHeight ?? 1;
-  // A sticker is drawn at its own size and a GIF is capped like a photo, so a
-  // sticker reads as a small gesture rather than as a picture that happens to
-  // be square.
-  const cap = entry.kind === "STICKER" ? width : MAX_IMAGE_WIDTH_PX;
-  const displayWidth = Math.min(width, cap);
-  const displayHeight = Math.round((displayWidth * height) / width);
-
-  if (!entry.assetUrl) return null;
+  // A sticker is capped smaller than a photo, so it reads as a gesture rather
+  // than as a picture that happens to be square. Capped rather than drawn at
+  // its own size: a pack whose artwork is larger than this one's would
+  // otherwise render at whatever size it happened to be authored at.
+  const cap = entry.kind === "STICKER" ? STICKER_WIDTH_PX : MAX_IMAGE_WIDTH_PX;
+  const { width, height, displayWidth, displayHeight } = reserveBox(entry, cap);
 
   return (
-    <img
-      src={entry.assetUrl}
-      // The GIF's description or the sticker's label. Real alt text rather
-      // than the empty string an image bubble uses: nobody has read a GIF's
-      // contents, but the provider named it, and a sticker's label is exact.
-      alt={entry.body ?? ""}
-      width={displayWidth}
-      height={displayHeight}
-      className="block rounded-[12px]"
-      style={{ maxWidth: "100%", height: "auto" }}
-      loading="lazy"
-      decoding="async"
-    />
+    <span
+      className="block overflow-hidden rounded-[12px]"
+      style={{
+        width: `${displayWidth}px`,
+        // Reserved from the aspect ratio rather than left to the image, so the
+        // space exists before the bytes do. The same box an image gets, and
+        // for the same reason -- this one just has no placeholder fill behind
+        // it, since a sticker's own edges are transparent.
+        aspectRatio: `${width} / ${height}`,
+        maxWidth: "100%",
+      }}
+    >
+      {entry.assetUrl ? (
+        <img
+          src={entry.assetUrl}
+          // The GIF's description or the sticker's label. Real alt text rather
+          // than the empty string an image bubble uses: nobody has read a
+          // GIF's contents, but the provider named it, and a sticker's label
+          // is exact.
+          alt={entry.body ?? ""}
+          width={displayWidth}
+          height={displayHeight}
+          // `contain` rather than `cover`: the box is already this picture's
+          // own aspect ratio, so nothing is cropped -- and a sticker with
+          // transparent margins must not be filled to the edges.
+          className="block h-full w-full object-contain"
+          loading="lazy"
+          decoding="async"
+        />
+      ) : null}
+    </span>
   );
 }
 
 function ImageBubble({ entry }: { entry: ConversationEntry }) {
-  const width = entry.assetWidth ?? 1;
-  const height = entry.assetHeight ?? 1;
-  const displayWidth = Math.min(width, MAX_IMAGE_WIDTH_PX);
-  const displayHeight = Math.round((displayWidth * height) / width);
+  const { width, height, displayWidth, displayHeight } = reserveBox(
+    entry,
+    MAX_IMAGE_WIDTH_PX,
+  );
 
   // The local preview while the sender's own upload is in flight, and the
   // authorized route once the Message has been Accepted. The route is asked
@@ -398,34 +464,31 @@ export function MessageList({
                   data-pending={entry.pending ? "true" : undefined}
                   className={cn(
                     "max-w-[85%] rounded-[12px] text-[14px] leading-5 break-words whitespace-pre-wrap sm:max-w-[70%]",
-                    // An image fills its bubble; only text needs the inset. A
-                    // padded image bubble would draw a frame of the sender's
-                    // colour around every picture.
-                    // An asset fills its bubble; only text needs the inset. A
-                    // padded picture would draw a frame of the sender's colour
-                    // around every one. A sticker goes further and drops the
-                    // bubble entirely -- artwork with its own transparent
-                    // edges sitting on a coloured slab looks like a mistake.
-                    entry.kind === "STICKER"
-                      ? "bg-transparent p-0 shadow-none"
-                      : entry.kind === "IMAGE" || entry.kind === "GIF"
-                        ? "overflow-hidden p-0"
-                        : "px-3 py-2",
-                    entry.kind === "STICKER"
-                      ? null
-                      : mine
+                    // A picture fills its bubble; only text needs the inset. A
+                    // padded one would draw a frame of the sender's colour
+                    // around every image.
+                    isPicture(entry.kind) ? "overflow-hidden p-0" : "px-3 py-2",
+                    // The slab, which a sticker does without -- artwork with
+                    // its own transparent edges sitting on a coloured
+                    // rectangle looks like a mistake.
+                    hasSlab(entry.kind) &&
+                      (mine
                         ? "bg-foreground text-elevated"
-                        : "bg-elevated text-foreground shadow-border",
+                        : "bg-elevated text-foreground shadow-border"),
                     // Pending is signalled by weight, not by a spinner: the
                     // Message is readable throughout, and settling is a
                     // one-property change rather than a layout shift.
                     entry.pending && "opacity-60",
+                    // Last, so a refusal's outline wins over whatever shadow
+                    // the bubble would otherwise carry -- a sticker has none
+                    // and an incoming bubble has its border, and in both cases
+                    // the red ring is the thing that has to be visible.
                     entry.failed && "shadow-[0_0_0_1px_var(--color-status-red)]",
                   )}
                 >
                   {entry.kind === "IMAGE" ? (
                     <ImageBubble entry={entry} />
-                  ) : entry.kind === "GIF" || entry.kind === "STICKER" ? (
+                  ) : isPicture(entry.kind) ? (
                     <AssetBubble entry={entry} />
                   ) : (
                     entry.body

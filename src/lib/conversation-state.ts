@@ -126,7 +126,16 @@ function toEntry(message: WireMessage): ConversationEntry {
     failureReason: refused ? (message.moderationReason ?? undefined) : undefined,
     assetWidth: message.assetWidth,
     assetHeight: message.assetHeight,
-    assetUrl: message.assetUrl,
+    // Only for the kinds that render from it. An IMAGE's `assetUrl` is a
+    // storage key in a private bucket, not something a bubble can fetch, and
+    // carrying it into client state would put the object's name in the page
+    // for no one to use -- the image is fetched by Message id through the
+    // authorized route instead, so the read model rules on it each time
+    // (ADR-0003).
+    assetUrl:
+      message.kind === "GIF" || message.kind === "STICKER"
+        ? message.assetUrl
+        : null,
   };
 }
 

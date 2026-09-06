@@ -4,6 +4,9 @@ import { useEffect, useRef, useState } from "react";
 import { Smile } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { stickerPacks, stickerUrl, type Sticker } from "@/lib/sticker-packs";
+// The wire shape, from the module that owns it. Deliberately not from the
+// provider adapter: that module holds the key, and this one ships to a browser.
+import type { WireGif } from "@/lib/wire";
 
 /**
  * The GIF and sticker picker.
@@ -20,15 +23,7 @@ import { stickerPacks, stickerUrl, type Sticker } from "@/lib/sticker-packs";
  * than showing an empty grid that looks like a search with no results.
  */
 
-/** A GIF as `/api/gifs/search` returns it -- the wire shape, not Tenor's. */
-export interface GifResult {
-  id: string;
-  description: string;
-  previewUrl: string;
-  fullUrl: string;
-  width: number;
-  height: number;
-}
+
 
 /**
  * How long a keystroke waits before it becomes a search.
@@ -77,9 +72,9 @@ function StickerGrid({ onPick }: { onPick: (packId: string, stickerId: string) =
   );
 }
 
-function GifGrid({ onPick }: { onPick: (gif: GifResult) => void }) {
+function GifGrid({ onPick }: { onPick: (gif: WireGif) => void }) {
   const [query, setQuery] = useState("");
-  const [results, setResults] = useState<GifResult[]>([]);
+  const [results, setResults] = useState<WireGif[]>([]);
   const [searching, setSearching] = useState(false);
   const [unavailable, setUnavailable] = useState(false);
 
@@ -109,7 +104,7 @@ function GifGrid({ onPick }: { onPick: (gif: GifResult) => void }) {
             return;
           }
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
-          const body = (await response.json()) as { results: GifResult[] };
+          const body = (await response.json()) as { results: WireGif[] };
           setUnavailable(false);
           setResults(body.results);
         })
@@ -168,16 +163,26 @@ function GifGrid({ onPick }: { onPick: (gif: GifResult) => void }) {
                 className="hover:bg-hover overflow-hidden rounded-[6px] outline-none focus-visible:shadow-[0_0_0_2px_#fff,0_0_0_4px_var(--color-accent)]"
               >
                 {/*
-                  The preview, not the full GIF: a grid of two dozen full-size
-                  GIFs would be several megabytes of animation to choose one
-                  from. What gets sent is the id, and the server resolves the
-                  full copy itself.
+                  The preview copy, not the full GIF: a grid of two dozen
+                  full-size GIFs would be several megabytes of animation to
+                  choose one from. What gets sent is the id, and the server
+                  resolves the full copy itself.
+
+                  Shown whole rather than cropped to a tidy grid. The point of
+                  this tile is that the sender sees what they are about to
+                  send, and `object-cover` on a fixed height would hide the
+                  edges of a wide GIF -- which is exactly where the joke
+                  usually is. Uneven tile heights are the price, and they are
+                  worth it.
                 */}
                 <img
                   src={gif.previewUrl}
                   alt=""
                   aria-hidden
-                  className="block h-24 w-full object-cover"
+                  className="block max-h-40 w-full object-contain"
+                  // Reserved from the dimensions the provider gave, so the
+                  // grid does not reflow as each animation decodes.
+                  style={{ aspectRatio: `${gif.width} / ${gif.height}` }}
                   loading="lazy"
                   decoding="async"
                 />
@@ -194,7 +199,7 @@ export function ExpressivePicker({
   onSendGif,
   onSendSticker,
 }: {
-  onSendGif: (gif: GifResult) => void;
+  onSendGif: (gif: WireGif) => void;
   onSendSticker: (packId: string, stickerId: string) => void;
 }) {
   const [open, setOpen] = useState(false);

@@ -3,7 +3,8 @@
 import { useRef, useState } from "react";
 import { ImagePlus } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { ExpressivePicker, type GifResult } from "@/components/expressive-picker";
+import { ExpressivePicker } from "@/components/expressive-picker";
+import type { WireGif } from "@/lib/wire";
 
 /**
  * The send box.
@@ -38,7 +39,7 @@ export function Composer({
    * only when both of these are given, since a panel with one working tab and
    * one missing one would be worse than no panel.
    */
-  onSendGif?: (gif: GifResult) => void;
+  onSendGif?: (gif: WireGif) => void;
   /** Called with a chosen sticker's pack and sticker ids. */
   onSendSticker?: (packId: string, stickerId: string) => void;
   /** Changes what the box says, never whether it accepts what is typed. */
