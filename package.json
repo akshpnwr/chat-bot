@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "postinstall": "prisma generate",
     "dev": "cross-env NODE_ENV=development tsx watch server/main.ts",
     "build": "next build && tsc -p tsconfig.server.json && node scripts/copy-dist-hook.mjs",
     "start": "cross-env NODE_ENV=production node --import ./dist/register-hook.mjs dist/server/main.js",
